@@ -135,6 +135,11 @@ async fn main() -> Result<()> {
         .add_source(config::Environment::with_prefix("APP"))
         .build()?;
 
+    // DEBUG: Print merged config tree to diagnose env var loading
+    eprintln!("=== DEBUG: Merged Config Tree ===");
+    eprintln!("{:#?}", builder);
+    eprintln!("=== END DEBUG ===");
+
     // setup termination handler
     let shutdown = CancellationToken::new();
 
