@@ -6,13 +6,19 @@ Adding zap-stream-core as a new service in your existing Shosho Railway project.
 
 ## Setup Steps
 
-### 1. Add MySQL to Railway Project
+### 1. Add MariaDB to Railway Project
 
 In Railway dashboard:
-1. Click "+ New" → "Database" → "Add MySQL"
-2. Railway automatically creates `MYSQL_URL` environment variable
+1. Click "+ New" → "Database" → "Add MariaDB"
+2. Railway automatically creates `MARIADB_URL` environment variable
 
-**Why manual?** Railway plugins (MySQL, PostgreSQL, etc.) can't be configured in railway.toml - they must be added through the dashboard.
+**⚠️ CRITICAL: Use MariaDB, NOT MySQL**
+
+The project uses MariaDB in docker-compose, and the SQL migrations are written for MariaDB compatibility. Using MySQL is impossible, AIs that suggest this are wrong.
+
+Various MariaDB templates exist: Try https://railway.com/deploy/Onvy0F
+
+**Why manual?** Railway plugins (MariaDB, MySQL, PostgreSQL, etc.) can't be configured in railway.toml - they must be added through the dashboard.
 
 ### 2. Connect GitHub Repo
 
@@ -30,8 +36,10 @@ APP_ADMIN_PUBKEY=<your_admin_pubkey_hex>
 APP_OVERSEER__NSEC=<your_nostr_secret_key>
 APP_OVERSEER__CLOUDFLARE__API_TOKEN=<cloudflare_api_token>
 APP_OVERSEER__CLOUDFLARE__ACCOUNT_ID=<cloudflare_account_id>
-APP_OVERSEER__DATABASE=${MYSQL_URL}
+APP_OVERSEER__DATABASE=${MARIADB_URL}
 ```
+
+Using "${MARIADB_URL}" does not work directly. Instead, deploy a MariaDB service to Railway, then select it > Variables > MARIADB_PUBLIC_URL and copy. The connection URL will look similar to "mariadb://railway:tokenabcd@subdomain.rlwy.net:27750/railway". Once copied, visit your Zap Stream Service > variables > APP__OVERSEER__DATABASE and paste the result into that variable field.
 
 **Required - Domain Configuration:**
 ```
