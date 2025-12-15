@@ -5,9 +5,9 @@ ARG CARGO_FEATURES=""
 RUN apt update && \
     apt install -y protobuf-compiler
 COPY . .
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/app/src/target \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry \
+    --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git \
+    --mount=type=cache,target=/app/src/target,id=cargo-target \
     cargo install --path ./crates/zap-stream --root /app/build ${CARGO_FEATURES}
 
 FROM debian:trixie-slim
