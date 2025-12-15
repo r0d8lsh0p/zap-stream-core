@@ -24,7 +24,8 @@ public_url: "https://api.shosho.live"
 # DO include http:// here e.g. "http://domain.name"
 
 # Admin pukey (hex), this must be set if you want to use the Admin UI
-admin_pubkey: "${APP_ADMIN_PUBKEY}"
+# Set via Railway env var: APP_ADMIN_PUBKEY
+admin_pubkey: ""
 
 # Bind address for http server serving files from [output_dir]
 listen_http: "0.0.0.0:8080"
@@ -35,13 +36,16 @@ overseer:
   backend: "cloudflare"
   # If cloudflare is selected enter api_token and account_id
   cloudflare:
-    api-token: "${APP_OVERSEER__CLOUDFLARE__API_TOKEN}"
-    account-id: "${APP_OVERSEER__CLOUDFLARE__ACCOUNT_ID}"
+    # Set via Railway env var: APP_OVERSEER__CLOUDFLARE__API_TOKEN
+    api-token: ""
+    # Set via Railway env var: APP_OVERSEER__CLOUDFLARE__ACCOUNT_ID
+    account-id: ""
 
   # At what balance we should alert the streamer to topup
   low_balance_threshold: 500
   # Primary nsec key for publishing stream events
-  nsec: "${APP_OVERSEER__NSEC}"
+  # Set via Railway env var: APP_OVERSEER__NSEC
+  nsec: ""
   # Terms URL (defaults to https://zap.stream/tos)
   tos-url: "https://shosho.live/docs/terms"
   # Client URL for "alt" tag "Watch live on" (defaults to https://zap.stream)
@@ -55,7 +59,8 @@ overseer:
     - "wss://relay.damus.io"
     - "wss://relay.fountain.fm"
     - "wss://relay.primal.net"
-  database: "${APP_OVERSEER__DATABASE}"
+  # Set via Railway env var: APP_OVERSEER__DATABASE
+  database: ""
   payments:
     # LUD-21 is required to use a lightning address backend
     lnurl:
