@@ -132,7 +132,11 @@ async fn main() -> Result<()> {
 
     let builder = Config::builder()
         .add_source(config::File::with_name("config.yaml"))
-        .add_source(config::Environment::with_prefix("APP").separator("__"))
+        .add_source(
+            config::Environment::with_prefix("APP")
+                .separator("__")
+                .convert_case(config::Case::Kebab)
+        )
         .build()?;
 
     // DEBUG: Print merged config tree to diagnose env var loading
