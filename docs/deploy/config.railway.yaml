@@ -16,7 +16,9 @@ endpoints_public_hostname: "ingest.shosho.live"
 output_dir: "./out"
 
 # Public URL for serving API and webhook and files for [output_dir]
-public_url: "https://api.shosho.live"
+# Public URL configuration provided entirely via Railway environment variables:
+# APP__PUBLIC_URL=<http://your.domain.name>
+# public_url: "https://api.shosho.live"
 # ignore_auth_url: true
 # e.g. specifying "http://domain.name" results in:
 # e.g. "http://domain.name/api/v1" -> Zap Stream Core API endpoint
