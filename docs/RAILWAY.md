@@ -84,22 +84,22 @@ https://api.shosho.live/webhooks/cloudflare
 
 **⚠️ CRITICAL: Every Push = Immediate Deployment**
 
-Railway is configured to **automatically deploy** on every push to the connected branch (railway-deployment).
+Railway is configured to **automatically deploy** on every push to the connected branch.
 
 **This means:**
-- `git push origin railway-deployment` → **IMMEDIATE PRODUCTION DEPLOYMENT**
+- `git push` → **IMMEDIATE DEPLOYMENT**
 - No manual approval required
 - No delay between push and deployment
 - Changes go live within minutes
 
-**DO NOT push to railway-deployment unless:**
+**DO NOT push to Github unless:**
 - You intend to deploy immediately
 - Changes have been tested locally
 - You are ready for deployment
 
 **For development work:**
 - Work on a different branch
-- Test thoroughly before merging/pushing to railway-deployment
+- Test thoroughly before merging/pushing
 - Only push when you're ready to deploy
 
 **⚠️ CRITICAL: FINAL CHECK**
