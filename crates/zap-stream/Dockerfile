@@ -5,10 +5,7 @@ ARG CARGO_FEATURES=""
 RUN apt update && \
     apt install -y protobuf-compiler
 COPY . .
-RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=shared \
-    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,target=/app/src/target,sharing=shared \
-    cargo install --path ./crates/zap-stream --root /app/build ${CARGO_FEATURES}
+RUN cargo install --path ./crates/zap-stream --root /app/build ${CARGO_FEATURES}
 
 FROM debian:trixie-slim
 WORKDIR /app
@@ -30,10 +27,11 @@ RUN apt update && \
     libva-wayland2 \
     libva-glx2 && \
     if [ "$(dpkg --print-architecture)" == "amd64" ]; then \
-        apt install -y libvpl-dev; \
+    apt install -y libvpl-dev; \
     fi \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/build .
 COPY --from=build /app/src/ffmpeg/lib/ /lib
+COPY docs/deploy/config.railway.yaml /app/config.yaml
 RUN /app/bin/zap-stream --version
 ENTRYPOINT ["/app/bin/zap-stream"]

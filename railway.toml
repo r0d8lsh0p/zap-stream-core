@@ -1,0 +1,8 @@
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "crates/zap-stream/Dockerfile"
+
+[deploy]
+startCommand = "/app/bin/zap-stream"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
