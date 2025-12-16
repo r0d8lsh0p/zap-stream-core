@@ -3,6 +3,7 @@ use crate::overseer::ZapStreamOverseer;
 use crate::settings::Settings;
 use crate::stream_manager::StreamManager;
 use crate::websocket_metrics::WebSocketMetricsServer;
+use zap_stream_core::ingress::ConnectionInfo;
 use anyhow::{Context, Result, anyhow, bail};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -62,7 +63,7 @@ pub struct Api {
     settings: Settings,
     payments: Arc<dyn LightningNode>,
     router: Router<Route>,
-    overseer: Arc<dyn Overseer>,
+    overseer: Arc<ZapStreamOverseer>,
     stream_manager: StreamManager,
     nostr_client: Client,
 }
@@ -604,7 +605,16 @@ impl Api {
 
     async fn get_account(&self, pubkey: &PublicKey) -> Result<AccountInfo> {
         let uid = self.db.upsert_user(&pubkey.to_bytes()).await?;
-        let user = self.db.get_user(uid).await?;
+        let mut user = self.db.get_user(uid).await?;
+
+        // Generate stream key if not set (new users with empty stream_key)
+        // Generate new key if empty OR if key is not valid for current backend
+        let backend = self.overseer.streaming_backend();
+        if user.stream_key.is_empty() || !backend.is_valid_stream_key(&user.stream_key) {
+            let stream_key = backend.generate_stream_key(&pubkey.to_bytes()).await?;
+            self.db.update_user_stream_key(uid, &stream_key).await?;
+            user.stream_key = stream_key; // Update local copy
+        }
 
         // Get user forwards
         let forwards = self.db.get_user_forwards(uid).await?;
@@ -612,47 +622,33 @@ impl Api {
         // Get ingest endpoints from database
         let db_ingest_endpoints = self.db.get_ingest_endpoints().await?;
 
-        // Create 2D array: settings endpoints × database ingest endpoints
-        let mut endpoints = Vec::new();
-
-        for setting_endpoint in &self.settings.endpoints {
-            if let Ok(listener_endpoint) = ListenerEndpoint::from_str(setting_endpoint) {
-                for ingest in &db_ingest_endpoints {
-                    if let Some(url) = listener_endpoint
-                        .to_public_url(&self.settings.endpoints_public_hostname, &ingest.name)
-                    {
-                        let protocol = match listener_endpoint {
-                            ListenerEndpoint::SRT { .. } => "SRT",
-                            ListenerEndpoint::RTMP { .. } => "RTMP",
-                            ListenerEndpoint::TCP { .. } => "TCP",
-                            _ => continue,
-                        };
-
-                        endpoints.push(Endpoint {
-                            name: format!("{}-{}", protocol, ingest.name),
-                            url,
-                            key: user.stream_key.clone(),
-                            capabilities: ingest
-                                .capabilities
-                                .as_ref()
-                                .map(|c| c.split(',').map(|s| s.trim().to_string()).collect())
-                                .unwrap_or_else(Vec::new),
-                            cost: EndpointCost {
-                                unit: "min".to_string(),
-                                rate: ingest.cost as f32 / 1000.0,
-                            },
-                        });
-                    }
-                }
-            }
-        }
+        // Use streaming backend to generate endpoint URLs
+        let backend = self.overseer.streaming_backend();
+        let backend_endpoints = backend.get_ingest_endpoints(&user, &db_ingest_endpoints).await?;
+        
+        // Convert backend endpoints to API endpoints
+        let endpoints: Vec<Endpoint> = backend_endpoints
+            .into_iter()
+            .map(|e| Endpoint {
+                name: e.name,
+                url: e.url,
+                key: e.key,
+                capabilities: e.capabilities,
+                cost: EndpointCost {
+                    unit: e.cost.unit,
+                    rate: e.cost.rate,
+                },
+            })
+            .collect();
 
         Ok(AccountInfo {
             endpoints,
             balance: user.balance / 1000,
             tos: AccountTos {
                 accepted: user.tos_accepted.is_some(),
-                link: "https://zap.stream/tos".to_string(),
+                link: self.settings.overseer.tos_url
+                    .clone()
+                    .unwrap_or_else(|| "https://zap.stream/tos".to_string()),
             },
             forwards: forwards
                 .into_iter()
@@ -999,35 +995,41 @@ impl Api {
     ) -> Result<CreateStreamKeyResponse> {
         let uid = self.db.upsert_user(&pubkey.to_bytes()).await?;
 
-        // Generate a new stream key first
-        let key = Uuid::new_v4().to_string();
+        // Generate a new stream key using the backend
+        let backend = self.overseer.streaming_backend();
+        let key = backend.generate_stream_key(&pubkey.to_bytes()).await?;
 
         // Create a new stream record for this key
         let stream_id = Uuid::new_v4();
 
-        // Create the stream key record and get its ID
-        let key_id = self
-            .db
-            .create_stream_key(uid, &key, req.expires, &stream_id.to_string())
-            .await?;
-
+        // Create the stream record FIRST (parent table) to satisfy foreign key constraint
+        // The stream_key_id will be updated after we create the key
         let new_stream = zap_stream_db::UserStream {
             id: stream_id.to_string(),
             user_id: uid,
             starts: Utc::now(),
             state: zap_stream_db::UserStreamState::Planned,
-            title: req.event.title,
-            summary: req.event.summary,
-            image: req.event.image,
-            tags: req.event.tags.map(|t| t.join(",")),
-            content_warning: req.event.content_warning,
-            goal: req.event.goal,
-            stream_key_id: Some(key_id),
+            title: req.event.title.clone(),
+            summary: req.event.summary.clone(),
+            image: req.event.image.clone(),
+            tags: req.event.tags.as_ref().map(|t| t.join(",")),
+            content_warning: req.event.content_warning.clone(),
+            goal: req.event.goal.clone(),
+            stream_key_id: None,  // Will be set after key creation
             ..Default::default()
         };
-
-        // Create the stream record with the stream_key_id set
         self.db.insert_stream(&new_stream).await?;
+
+        // Now create the stream key record (child table with foreign key to user_stream)
+        let key_id = self
+            .db
+            .create_stream_key(uid, &key, req.expires, &stream_id.to_string())
+            .await?;
+
+        // Update the stream with the key_id for bidirectional linking
+        let mut updated_stream = new_stream.clone();
+        updated_stream.stream_key_id = Some(key_id);
+        self.db.update_stream(&updated_stream).await?;
 
         // For now, return minimal response - event building would require nostr integration
         Ok(CreateStreamKeyResponse {
@@ -1699,13 +1701,37 @@ impl HttpServerPlugin for Api {
     fn get_active_streams(&self) -> Pin<Box<dyn Future<Output = Result<Vec<StreamData>>> + Send>> {
         let db = self.db.clone();
         let viewers = self.stream_manager.clone();
+        let output_dir = self.settings.output_dir.clone();
+        let overseer = self.overseer.clone();
+        
         Box::pin(async move {
             let streams = db.list_live_streams().await?;
             let mut ret = Vec::with_capacity(streams.len());
             for stream in streams {
+                // Check if local HLS file exists (unchanged behaviour for local backend)
+                let local_path = format!("{}/{}/live.m3u8", stream.id, HlsEgress::PATH);
+                let local_file_exists = std::path::Path::new(&output_dir)
+                    .join(&stream.id)
+                    .join(HlsEgress::PATH)
+                    .join("live.m3u8")
+                    .exists();
+                
+                let live_url = if local_file_exists {
+                    // LOCAL stream (RML RTMP) - PRIMACY - unchanged behavior
+                    // Respect upstream zap-stream-core logic fully
+                    local_path
+                } else {
+                    // NON-LOCAL stream (Cloudflare or other backends) - use backend abstraction
+                    let backend = overseer.streaming_backend();
+                    match backend.get_hls_url(&stream.id).await {
+                        Ok(url) => url,
+                        Err(_) => local_path,  // Ultimate fallback
+                    }
+                };
+                
                 let viewers = viewers.get_viewer_count(&stream.id).await;
                 ret.push(StreamData {
-                    live_url: format!("{}/{}/live.m3u8", stream.id, HlsEgress::PATH),
+                    live_url,
                     id: stream.id,
                     title: stream.title.unwrap_or_default(),
                     summary: stream.summary,
@@ -1755,6 +1781,126 @@ impl HttpServerPlugin for Api {
                     Ok(error_response)
                 }
             }
+        })
+    }
+
+    fn handle_webhook(
+        &self,
+        payload: Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+        let backend = self.overseer.streaming_backend();
+        let overseer = self.overseer.clone();
+        
+        Box::pin(async move {
+            // Parse the webhook payload using the backend
+            let event = backend.parse_external_event(&payload)?;
+            
+            if let Some(event) = event {
+                use crate::streaming_backend::ExternalStreamEvent;
+                
+                match event {
+                    ExternalStreamEvent::Connected { input_uid, app_name } => {
+                        // 1. Generate fresh UUID for this stream session
+                        let stream_id = Uuid::new_v4();
+                        
+                        // 2. Create ConnectionInfo - completely generic, uses backend-provided values
+                        let connection_info = ConnectionInfo {
+                            id: stream_id,
+                            endpoint: "webhook",  // Generic identifier for webhook-based connections
+                            app_name: app_name.clone(),  // Backend provides this (e.g., "Basic")
+                            key: input_uid.clone(),  // Used to look up user in DB
+                            ip_addr: "webhook".to_string(),  // Generic - no real IP from webhooks
+                        };
+                        
+                        // 3. Call overseer.connect() - handles user lookup & reconnection logic
+                        match overseer.connect(&connection_info).await {
+                            Ok(connect_result) => {
+                                use zap_stream_core::overseer::ConnectResult;
+                                match connect_result {
+                                    ConnectResult::Allow { stream_id_override, .. } => {
+                                        // 4. Get final stream_id (respects reconnection window)
+                                        let final_stream_id = stream_id_override.unwrap_or(stream_id);
+                                        
+                                        // 5. Update ConnectionInfo with final stream_id
+                                        let final_connection_info = ConnectionInfo {
+                                            id: final_stream_id,
+                                            ..connection_info
+                                        };
+                                        
+                                        // 6. Register mapping in backend (for disconnect lookup)
+                                        if let Err(e) = backend.register_stream_mapping(&input_uid, final_stream_id) {
+                                            error!("Failed to register stream mapping: {}", e);
+                                            return Ok(());
+                                        }
+                                        
+                                        // 7. Call overseer.start_stream() with None (webhook backends don't have local pipeline)
+                                        match overseer.start_stream(&final_connection_info, None).await {
+                                            Ok(_) => {}
+                                            Err(e) => {
+                                                error!("Failed to start stream via webhook: {}", e);
+                                                // Clean up mapping on failure
+                                                let _ = backend.remove_stream_mapping(&input_uid);
+                                            }
+                                        }
+                                    }
+                                    ConnectResult::Deny { reason } => {
+                                        warn!("Stream connection denied: {}", reason);
+                                    }
+                                }
+                            }
+                            Err(e) => error!("Failed to process connection: {}", e),
+                        }
+                    }
+                    ExternalStreamEvent::Disconnected { input_uid } => {
+                        // 1. Look up stream_id from mapping
+                        match backend.get_stream_id_for_input_uid(&input_uid) {
+                            Ok(Some(stream_id)) => {
+                                // 2. Call overseer.on_end()
+                                match overseer.on_end(&stream_id).await {
+                                    Ok(_) => {
+                                        // 3. Clean up mapping
+                                        if let Err(e) = backend.remove_stream_mapping(&input_uid) {
+                                            warn!("Failed to remove stream mapping: {}", e);
+                                        }
+                                    }
+                                    Err(e) => error!("Failed to end stream via webhook: {}", e),
+                                }
+                            }
+                            Ok(None) => {
+                                warn!("Received disconnect webhook for unknown input_uid: {}", input_uid);
+                            }
+                            Err(e) => error!("Failed to lookup stream_id: {}", e),
+                        }
+                    }
+                    ExternalStreamEvent::VideoAssetReady { input_uid, recording_url, thumbnail_url, duration } => {
+                        // Look up stream_id and trigger Nostr event republish
+                        // Backend has already cached the recording URLs during parse_external_event()
+                        match backend.get_stream_id_for_input_uid(&input_uid) {
+                            Ok(Some(stream_id)) => {
+                                // We get the recording and thumbnail URLs
+                                // We populate the back end cache
+                                // We do NOT need to update the recording URL in the database as it's not stored there 
+                                // We DO need to update the thumbnail URL in the database (matches RML RTMP pattern via on_thumbnail)
+                                if let Err(e) = overseer.on_thumbnail(&stream_id, 0, 0, &std::path::PathBuf::new()).await {
+                                    warn!("Failed to update thumbnail for stream {}: {}", stream_id, e);
+                                }
+                                
+                                // Then republish Nostr event
+                                // Which will update the thumbnail URL (from the DB) and the recording URL (from the backend cache)
+                                if let Err(e) = overseer.on_update(&stream_id).await {
+                                    warn!("Failed to republish Nostr event with recording for stream {}: {}", stream_id, e);
+                                }
+                            }
+                            Ok(None) => {
+                                info!("Received VideoAssetReady webhook for input_uid {} but stream mapping not found (may have expired after 60s)", input_uid);
+                            }
+                            Err(e) => error!("Failed to lookup stream_id for VideoAssetReady: {}", e),
+                        }
+                    }
+                }
+            }
+            
+            Ok(())
         })
     }
 }

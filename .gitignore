@@ -2,6 +2,7 @@
 .idea/
 **/out/
 docs/deploy/data/
+node_modules/
 
 # local configuration
 docs/deploy/compose-config.yaml
@@ -9,3 +10,10 @@ docs/deploy/docker-compose.override.yaml
 docs/deploy/docker-compose.override.yml
 *.local.yaml
 *.local.yml
+
+# Cloudflare API credentials and test output
+scripts/.env
+cloudflare-api-responses-*/
+
+# AI development notes
+notes/
