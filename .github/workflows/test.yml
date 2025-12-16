@@ -17,7 +17,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install FFmpeg dependencies
+      - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -30,7 +30,8 @@ jobs:
             libavfilter-dev \
             libavdevice-dev \
             clang \
-            pkg-config
+            pkg-config \
+            protobuf-compiler
 
       - name: Cache cargo registry
         uses: actions/cache@v4
