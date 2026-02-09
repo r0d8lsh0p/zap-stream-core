@@ -162,6 +162,7 @@ impl ZapStreamDb {
         .bind(user_stream.endpoint_id)
         .bind(&user_stream.node_name)
         .bind(user_stream.stream_key_id)
+        .bind(&user_stream.external_id)
         .bind(&user_stream.id)
         .bind(&user_stream.external_id)
         .execute(&self.db)
@@ -903,6 +904,19 @@ impl ZapStreamDb {
     )
         .bind(user_id)
         .fetch_all(&self.db)
+        .await?)
+    }
+
+    /// Get the most recent ended stream for a user
+    pub async fn get_user_latest_ended_stream(
+        &self,
+        user_id: u64,
+    ) -> Result<Option<UserStream>> {
+        Ok(sqlx::query_as(
+            "select * from user_stream where user_id = ? and state = 3 order by ends desc, starts desc limit 1",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.db)
         .await?)
     }
 
