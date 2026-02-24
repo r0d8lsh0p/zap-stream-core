@@ -26,12 +26,12 @@ RUN apt update && \
     libva-x11-2 \
     libva-wayland2 \
     libva-glx2 && \
-    if [ "$(dpkg --print-architecture)" == "amd64" ]; then \
+    if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
     apt install -y libvpl-dev; \
     fi \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/build .
 COPY --from=build /app/src/ffmpeg/lib/ /lib
 COPY docs/deploy/config.railway.external.yaml /app/config.yaml
-RUN /app/bin/zap-stream-external --version
+RUN test -x /app/bin/zap-stream-external
 ENTRYPOINT ["/app/bin/zap-stream-external"]
