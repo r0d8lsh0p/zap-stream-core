@@ -63,7 +63,11 @@ struct Settings {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt().init();
+    if std::env::var("LOG_FORMAT").as_deref() == Ok("json") {
+        tracing_subscriber::fmt().json().flatten_event(true).init();
+    } else {
+        tracing_subscriber::fmt().init();
+    }
 
     setup_crypto_provider();
 
