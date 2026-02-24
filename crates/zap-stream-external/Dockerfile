@@ -32,6 +32,6 @@ RUN apt update && \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/build .
 COPY --from=build /app/src/ffmpeg/lib/ /lib
-COPY crates/zap-stream-external/config.yaml /app/config.yaml
+COPY docs/deploy/config.railway.external.yaml /app/config.yaml
 RUN /app/bin/zap-stream-external --version
 ENTRYPOINT ["/app/bin/zap-stream-external"]

@@ -1,0 +1,66 @@
+# Railway deployment config for zap-stream-external
+#
+# CRITICAL: If a value exists in this file, the corresponding Railway
+# environment variable is COMPLETELY IGNORED. The Rust `config` crate loads
+# files first, then environment variables. Only commented-out keys can be
+# overridden by env vars.
+#
+# Never uncomment Railway-managed values or you'll be debugging for hours
+# why your environment variables aren't working.
+
+# Database connection string
+# Set via Railway env var: APP__DATABASE
+# database: "mysql://..."
+
+# Public URL of the HTTP server
+# Set via Railway env var: APP__PUBLIC_URL
+# public_url: "https://api.shosho.live"
+
+# Bind address for HTTP server
+listen_http: "[::]:8080"
+
+# Terms URL (defaults to https://zap.stream/tos)
+tos_url: "https://shosho.live/docs/terms"
+
+# Client URL for "alt" tag "Watch live on" (defaults to https://zap.stream)
+client_url: "https://shosho.live/live"
+
+# Public hostname for ingest endpoints (custom RTMPS domain)
+# See https://developers.cloudflare.com/stream/stream-live/custom-domains/
+# DO NOT include http:// here e.g. "domain.name" NOT "http://domain.name"
+endpoints_public_hostname: "ingest.shosho.live"
+
+# Primary nsec key for publishing stream events
+# Set via Railway env var: APP__NSEC
+# nsec: "nsec1..."
+
+# Nostr relays to publish to
+relays:
+  - "wss://nos.lol"
+  - "wss://relay.snort.social"
+  - "wss://relay.damus.io"
+  - "wss://relay.fountain.fm"
+  - "wss://relay.primal.net"
+
+# Cloudflare API credentials
+# Set via Railway env vars:
+# APP__CLOUDFLARE__TOKEN=<your_api_token>
+# APP__CLOUDFLARE__ACCOUNT_ID=<your_account_id>
+# cloudflare:
+#   token: "..."
+#   account_id: "..."
+
+# Lightning node config
+payments:
+  # LUD-21 is required to use a lightning address backend
+  lnurl:
+    address: "rb@rodbishop.nz"
+  #bitvora:
+  #  api_token: "abc123"
+  #  webhook_secret: "abc123"
+  #nwc:
+  #  url: "nostr+walletconnect://..."
+  #lnd:
+  #  address: "https://127.0.0.1:10001"
+  #  cert: "/path/to/tls.cert"
+  #  macaroon: "/path/to/admin.macaroon"
