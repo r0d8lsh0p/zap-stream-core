@@ -939,9 +939,8 @@ impl CfApiWrapper {
             let count_str = count.to_string();
             extra_tags.push(Tag::parse(["current_participants", count_str.as_str()])?);
         }
-        let alt_tag = build_alt_tag(&self.nostr_client, stream, &self.client_url).await?;
-        extra_tags.push(alt_tag);
-        let ev = self.n53.stream_to_event(stream, extra_tags).await?;
+        let alt_text = build_alt_text(&self.nostr_client, stream, &self.client_url).await?;
+        let ev = self.n53.stream_to_event(stream, extra_tags, Some(alt_text)).await?;
         self.n53.publish(&ev).await?;
         info!("Published stream event {}", ev.id.to_hex());
         Ok(ev)
@@ -996,14 +995,26 @@ impl CfApiWrapper {
         let mut url = Url::parse(&self.public_url)?;
         url.set_path(Self::WEBHOOK_API_PATH);
 
-        let webhooks = self.client.get_webhooks().await?;
-        if webhooks.success
-            && let Some(w) = webhooks.result
-            && w.notification_url == url.as_str()
-        {
-            info!("Webhook notification url already registered: {}", url);
-            self.webhook_details.write().await.replace(w);
-            return Ok(());
+        // Check if webhook is already registered; treat errors (e.g. 404 on
+        // fresh accounts with no webhook) as "not registered" and proceed to
+        // create one.
+        if let Ok(webhooks) = self.client.get_webhooks().await {
+            if webhooks.success {
+                if let Some(w) = webhooks.result {
+                    if w.notification_url == url.as_str() {
+                        info!("Webhook notification url already registered: {}", url);
+                        self.webhook_details.write().await.replace(w);
+                        return Ok(());
+                    }
+                    info!("Webhook URL mismatch, updating...");
+                } else {
+                    info!("No webhook registered, creating...");
+                }
+            } else {
+                info!("Webhook query unsuccessful, creating...");
+            }
+        } else {
+            info!("Could not fetch existing webhook, creating...");
         }
 
         let wh = self.client.create_webhook(url.to_string().as_str()).await?;
@@ -1275,29 +1286,25 @@ fn resolve_client_url(client_url: Option<&str>) -> String {
     }
 }
 
-async fn build_alt_tag(client: &Client, stream: &UserStream, client_url: &str) -> Result<Tag> {
+async fn build_alt_text(client: &Client, stream: &UserStream, client_url: &str) -> Result<String> {
     let pubkey = client.signer().await?.get_public_key().await?;
     let coord = Coordinate::new(Kind::LiveEvent, pubkey).identifier(&stream.id);
-    Tag::parse([
-        "alt",
-        &format!(
-            "Watch live on {}/{}",
-            client_url,
-            nostr_sdk::nips::nip19::Nip19Coordinate {
-                coordinate: coord,
-                relays: vec![]
-            }
-            .to_bech32()?
-        ),
-    ])
-    .map_err(Into::into)
+    Ok(format!(
+        "Watch live on {}/{}",
+        client_url,
+        nostr_sdk::nips::nip19::Nip19Coordinate {
+            coordinate: coord,
+            relays: vec![]
+        }
+        .to_bech32()?
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         apply_custom_ingest_domain, apply_video_asset_to_stream, build_account_endpoints,
-        build_alt_tag, build_stream_key, get_download_url, resolve_client_url, resolve_tos_url,
+        build_alt_text, build_stream_key, get_download_url, resolve_client_url, resolve_tos_url,
         select_ingest_endpoint, select_stream_for_video_asset, slugify_title, ViewerCountTracker,
     };
     use crate::cloudflare::{LiveInput, Playback, RtmpsEndpoint, SrtEndpoint, VideoAssetStatus, VideoAssetWebhook};
@@ -1516,19 +1523,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_nostr_event_uses_configured_client_url() {
+    async fn build_alt_text_uses_configured_client_url() {
         let keys = Keys::generate();
         let client = nostr_sdk::ClientBuilder::new().signer(keys).build();
-        let alt_tag = build_alt_tag(&client, &sample_stream(), "https://client.example")
+        let alt_text = build_alt_text(&client, &sample_stream(), "https://client.example")
             .await
             .unwrap();
-        let alt_value = alt_tag
-            .as_slice()
-            .get(1)
-            .map(|v| v.as_str())
-            .unwrap();
 
-        assert!(alt_value.starts_with("Watch live on https://client.example/"));
+        assert!(alt_text.starts_with("Watch live on https://client.example/"));
     }
 
     #[test]

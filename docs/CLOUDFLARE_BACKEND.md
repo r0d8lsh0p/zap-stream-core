@@ -40,17 +40,89 @@ Optional (but recommended):
 
 ## Cloudflare setup
 
-You will need a Cloudflare account with Live Streaming enabled.
+You will need a Cloudflare account with **Stream** (paid subscription) enabled.
 
-1) **Create an API token** with access to Stream
-2) **Set webhook destination** to your external service
-3) **Enable notifications** for:
-   - `live_input.connected`
-   - `live_input.disconnected`
-   - `live_input.errored`
-   - `live_input.recording.ready`
+### 1. Create an API token
 
-Your external service will automatically register the webhook URL on startup, and Cloudflare should confirm it.
+In the Cloudflare dashboard:
+- **My Profile** → **API Tokens** → **Create Token** → **Custom token**
+- Permissions:
+  - **Account** → **Stream** → **Edit**
+  - **Account** → **Notifications** → **Edit**
+- Account resources: **Include** → select your account
+- Set `cloudflare.token` and `cloudflare.account_id` in your config
+
+Both permissions are required. Stream is for live input management and video asset webhooks. Notifications is for the live input event alerting policy (connected/disconnected).
+
+### 2. Understand the two webhook systems
+
+Cloudflare uses two separate webhook delivery mechanisms for Stream:
+
+| System | What it delivers | How it's configured |
+|--------|-----------------|-------------------|
+| **Stream webhook** (`/stream/webhook` API) | Video Asset events (recording ready, thumbnail) | Auto-registered by the service on startup |
+| **Notification policy** (Alerting API) | Live input events (`live_input.connected`, `live_input.disconnected`, `live_input.errored`) | One-time API setup per account (step 4 below) |
+
+Both deliver to the same URL (`{public_url}/api/v1/webhook/cloudflare`) but via different Cloudflare systems.
+
+### 3. Stream webhook registration (automatic)
+
+The service automatically registers its webhook URL with Cloudflare on startup via `PUT /stream/webhook`. If no webhook exists yet (fresh account), it creates one. If one exists with the correct URL, it skips registration.
+
+**Note**: Cloudflare supports only **one Stream webhook URL per account**. If multiple instances (e.g. staging and production) share a Cloudflare account, each startup will overwrite the other's webhook URL. Use separate Cloudflare accounts for separate environments.
+
+### 4. Create notification policy for live input events (one-time setup)
+
+Without this step, the service will NOT receive `live_input.connected` or `live_input.disconnected` events. Streams will only be tracked by the 30-second poller, and recordings will still work, but the live lifecycle will not be webhook-driven.
+
+This is a one-time setup per Cloudflare account, done via the Alerting API. It does NOT require any zones or domains on the account.
+
+**Step 1: Create a webhook destination**
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer <API_TOKEN>" \
+  -H "Content-Type: application/json" \
+  "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/alerting/v3/destinations/webhooks" \
+  -d '{"name": "ZS Core Webhook", "url": "<PUBLIC_URL>/api/v1/webhook/cloudflare"}'
+```
+
+Response includes the webhook destination `id` — save it for step 2.
+
+**Step 2: Create the notification policy**
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer <API_TOKEN>" \
+  -H "Content-Type: application/json" \
+  "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/alerting/v3/policies" \
+  -d '{
+    "name": "Stream Live Notifications",
+    "description": "Notifies on live stream connect/disconnect/error",
+    "enabled": true,
+    "alert_type": "stream_live_notifications",
+    "mechanisms": {
+      "webhooks": [{"id": "<WEBHOOK_DESTINATION_ID>"}]
+    },
+    "filters": {}
+  }'
+```
+
+Empty `filters` means all live inputs are monitored. To restrict to specific inputs, add `"input_id": ["<input_id>"]` inside `filters`.
+
+**Verify the setup:**
+
+```bash
+# List notification policies
+curl -s -H "Authorization: Bearer <API_TOKEN>" \
+  "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/alerting/v3/policies" | jq .
+
+# List webhook destinations
+curl -s -H "Authorization: Bearer <API_TOKEN>" \
+  "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/alerting/v3/destinations/webhooks" | jq .
+```
+
+**Note**: The Cloudflare dashboard Notifications UI may not show these options on accounts without zones. The API works regardless.
 
 ## Custom ingest domain (optional)
 
