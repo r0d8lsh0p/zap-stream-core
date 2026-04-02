@@ -28,7 +28,8 @@ client_url: "https://shosho.live/live"
 # Public hostname for ingest endpoints (custom RTMPS domain)
 # See https://developers.cloudflare.com/stream/stream-live/custom-domains/
 # DO NOT include http:// here e.g. "domain.name" NOT "http://domain.name"
-endpoints_public_hostname: "ingest.shosho.live"
+# Set via Railway env var: APP__ENDPOINTS_PUBLIC_HOSTNAME
+# endpoints_public_hostname: "ingest.shosho.live"
 
 # Primary nsec key for publishing stream events
 # Set via Railway env var: APP__NSEC
