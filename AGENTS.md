@@ -142,6 +142,9 @@ The Cloudflare Stream API docs are maintained by Cloudflare:
 - `notes/CRITICAL-GIT-STRATEGY.md` — Git safety, pre-commit checklist, anti-patterns (**READ FIRST**)
 - `notes/deployment-and-config.md` — How config loading, Docker builds, and deployment work (**READ BEFORE touching config or Dockerfiles**)
 
+### Operations
+- `notes/operating-procedures.md` — Runbook for health checks, log reading, and administration
+
 ### Reference
 - `docs/CLOUDFLARE_BACKEND.md` — Cloudflare Stream integration architecture, webhook setup
 - `docs/RAILWAY.md` — Railway deployment setup
