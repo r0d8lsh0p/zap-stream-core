@@ -148,3 +148,11 @@ Getting this wrong means production silently uses the wrong credentials.
 ### 8. Do not edit the Dockerfile on integration/external to reference railway-specific files
 
 The Dockerfile on `integration/external` must reference only upstream-compatible paths. Railway-specific changes (like the config file path) belong on `railway/external` only, as a direct edit that diverges from integration.
+
+### 9. NEVER delete a migration file that has been applied to production
+
+SQLx's `migrate!().run()` calls `validate_applied_migrations()` on startup. It compares the embedded migration files against the `_sqlx_migrations` table in the database. If the database has a record of a migration that is not in the binary, SQLx returns `MigrateError::VersionMissing` and **the service crashes on startup**.
+
+This means: once a migration has been applied to any database, its file must remain in the `migrations/` directory forever (or until the `_sqlx_migrations` row is manually deleted from that database).
+
+The `set_ignore_missing(true)` escape hatch exists but is not used in this codebase.
