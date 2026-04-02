@@ -331,9 +331,13 @@ tmpdir=$(mktemp -d) && cd "$tmpdir" \
 
 ---
 
-## 5. Verify Cloudflare webhook notification URL
+## 5. Verify Cloudflare webhook configuration
 
-The Cloudflare account has a single webhook URL for stream notifications. Dev/test instances can accidentally overwrite it, breaking production webhook delivery.
+Cloudflare uses two separate webhook systems. Both must be correctly configured. See `docs/CLOUDFLARE_BACKEND.md` for full details.
+
+### 5a. Stream webhook (video asset events)
+
+The server auto-registers this on startup. One URL per account — dev/test instances can overwrite it.
 
 ```bash
 tmpdir=$(mktemp -d) && cd "$tmpdir" \
@@ -346,4 +350,25 @@ tmpdir=$(mktemp -d) && cd "$tmpdir" \
 ```
 
 - **Expected**: `"https://api.shosho.live/api/v1/webhook/cloudflare"`
-- **Any other URL**: A dev/test instance has overwritten it. Production will not receive webhook events until corrected. Redeploying the production service will re-register the correct URL on startup.
+- **Any other URL**: A dev/test instance has overwritten it. Redeploying production will re-register the correct URL.
+
+### 5b. Notification policy (live input connected/disconnected events)
+
+This is a one-time setup per CF account (see r0d8lsh0p/shosho-monorepo#824 for auto-setup). Without it, `live_input.connected` and `live_input.disconnected` events are never delivered.
+
+```bash
+tmpdir=$(mktemp -d) && cd "$tmpdir" \
+  && railway link --project 6a3ef637-b5ac-4b7a-8c59-eafa71d9ff98 \
+     --environment Production --service "ZS Core with CF Stream" \
+  && railway run -- bash -c \
+     'echo "=== Webhook destinations ===" && \
+      curl -s "https://api.cloudflare.com/client/v4/accounts/${APP__CLOUDFLARE__ACCOUNT_ID}/alerting/v3/destinations/webhooks" \
+       -H "Authorization: Bearer ${APP__CLOUDFLARE__TOKEN}" | jq ".result[] | {id, name, url}" && \
+      echo "=== Notification policies ===" && \
+      curl -s "https://api.cloudflare.com/client/v4/accounts/${APP__CLOUDFLARE__ACCOUNT_ID}/alerting/v3/policies" \
+       -H "Authorization: Bearer ${APP__CLOUDFLARE__TOKEN}" | jq ".result[] | {id, name, alert_type, enabled}"' \
+  && cd - >/dev/null && rm -rf "$tmpdir"
+```
+
+- **Expected**: At least one webhook destination pointing to the correct URL, and one policy with `alert_type: stream_live_notifications` and `enabled: true`.
+- **Missing or wrong**: Follow the setup instructions in `docs/CLOUDFLARE_BACKEND.md` step 4.

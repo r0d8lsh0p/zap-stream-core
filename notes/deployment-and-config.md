@@ -43,8 +43,11 @@ Source: `docs/deploy/config.railway.external.yaml` header comment explains this.
 1. Railway detects a push to `railway/external` on origin
 2. Railway builds the Docker image using `crates/zap-stream-external/Dockerfile`
 3. The Dockerfile copies `docs/deploy/config.railway.external.yaml` as `/app/config.yaml` into the image (line 35)
-4. At runtime, Railway injects secrets as env vars (`APP__DATABASE`, `APP__NSEC`, `APP__CLOUDFLARE__TOKEN`, `APP__CLOUDFLARE__ACCOUNT_ID`)
+4. At runtime, Railway injects secrets as env vars (`APP__DATABASE`, `APP__NSEC`, `APP__CLOUDFLARE__TOKEN`, `APP__CLOUDFLARE__ACCOUNT_ID`, `APP__ENDPOINTS_PUBLIC_HOSTNAME`)
 5. The binary loads `config.yaml` then overlays the env vars — secrets take effect because they are commented out in the config file
+6. On startup, the binary auto-registers the Stream webhook with Cloudflare (`PUT /stream/webhook`)
+
+**Cloudflare notification policy** (one-time per account): The `live_input.connected` and `live_input.disconnected` events require a separate notification policy configured via the Cloudflare Alerting API. This is NOT auto-created on startup (see r0d8lsh0p/shosho-monorepo#824). Follow `docs/CLOUDFLARE_BACKEND.md` step 4 for setup. The API token needs both **Stream** and **Notifications** permissions.
 
 **The Dockerfile differs between branches.** This is a direct edit, not a Docker override:
 - `integration/external`: `COPY crates/zap-stream-external/config.yaml /app/config.yaml` (upstream default)
