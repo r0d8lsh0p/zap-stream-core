@@ -53,6 +53,7 @@ railway/external       <-- production deployment branch
 | Railway deployment config | `railway.toml`, `docs/deploy/config.railway.external.yaml`, `docs/RAILWAY.md` |
 | Dockerfile config path | `crates/zap-stream-external/Dockerfile` — COPY line changed to use `config.railway.external.yaml` |
 | Structured JSON logging | `crates/zap-stream-external/src/main.rs` (`LOG_FORMAT=json` support), `Cargo.toml` (`json` feature on tracing-subscriber) |
+| Production data migration | `crates/zap-stream-db/migrations/20260224000000_migrate_cf_uid_to_external_id.sql` — one-time migration already applied to prod DB. **Cannot be deleted** because SQLx will crash on startup if a previously-applied migration file is missing. |
 | Agent documentation | `AGENTS.md`, `notes/` |
 
 **If a commit exists on `integration/external`, it MUST also be on `railway/external`.** Missing cherry-picks mean production is running different code than what's in the upstream PR.
