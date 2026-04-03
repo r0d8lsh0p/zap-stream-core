@@ -143,6 +143,14 @@ See `crates/zap-stream-external/tests/TESTING_README.md` for the full E2E test p
 - **Verify branch before any push**: `git branch --show-current`
 - **Each branch has its own `.gitignore`** — files safe on one branch may be exposed on another
 
+## Operations & Railway access
+
+Read `notes/operating-procedures.md` for all operational procedures. Key procedures:
+
+- **Railway logs and env vars**: Use the temp directory pattern with `railway link`. Project ID, service name, and examples are in the `railway-logs` skill (`.claude/skills/railway-logs/SKILL.md`) and in `notes/operating-procedures.md` procedure 1.
+- **Nostr event operations**: Use `nak` with the server nsec and `a` tag for working with replaceable events. e.g. see procedure 6.
+- **Staging smoke test**: Use a persistent test nsec (not throwaway), clean up test events afterwards. See procedure 7.
+
 ## Deployment & Configuration
 
 Read `notes/deployment-and-config.md` before touching any config files, Dockerfiles, or deployment workflows. It documents how the binary loads config, how production deployment works, how local Docker testing works, and anti-patterns to avoid.
