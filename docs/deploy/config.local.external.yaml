@@ -1,0 +1,43 @@
+# Local development config for zap-stream-external
+#
+# This file is mounted into the Docker container by docker-compose.override.yml,
+# replacing config.railway.external.yaml. Secrets are commented out so they can
+# be overridden by APP__* env vars loaded from .env.
+#
+# See config.railway.external.yaml for the production equivalent.
+
+# Database connection string
+# Set via .env: APP__DATABASE
+# database: "mysql://root:devpass123@db:3306/zap_stream?max_connections=2"
+
+# Public URL of the HTTP server (cloudflared tunnel URL)
+# Set via .env: APP__PUBLIC_URL
+# public_url: "https://xxx.trycloudflare.com"
+
+# Bind address for HTTP server
+listen_http: "0.0.0.0:8080"
+
+# Terms URL
+tos_url: "https://shosho.live/docs/terms"
+
+# Client URL for "alt" tag "Watch live on"
+client_url: "https://shosho.live/live"
+
+# Primary nsec key for publishing stream events
+# Set via .env: APP__NSEC
+# nsec: "nsec1..."
+
+# Nostr relays — local test relay only (no public network spam)
+relays:
+  - "ws://host.docker.internal:3334"
+
+# Cloudflare API credentials
+# Set via .env: APP__CLOUDFLARE__TOKEN, APP__CLOUDFLARE__ACCOUNT_ID
+# cloudflare:
+#   token: "..."
+#   account_id: "..."
+
+# Lightning node config
+payments:
+  lnurl:
+    address: "live@shosho.live"
