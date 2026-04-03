@@ -1,5 +1,13 @@
 # zap-stream-core (Shosho Fork)
 
+## CRITICAL: No destructive Cloudflare actions without explicit user approval
+
+**Never take any destructive action on Cloudflare resources without explicit user approval.** This includes deleting, modifying, or overwriting any resource via the Cloudflare API. Always ask first.
+
+**Cloudflare Live Inputs are especially dangerous to delete.** Dev and staging environments share the same Cloudflare account. Deleting a live input is irreversible — there is no undo, no trash, no restore. The database stores `external_id` references to live inputs. If a live input is deleted from Cloudflare, every user and custom stream key that referenced it is permanently broken. The server can self-heal default user inputs on the next API call, but custom key inputs and any active streams are destroyed with no recovery path. If test data accumulates on Cloudflare, leave it.
+
+---
+
 ## What this is
 
 A fork of [v0l/zap-stream-core](https://github.com/v0l/zap-stream-core) — a Rust backend for live streaming on Nostr. Our fork adds Cloudflare Stream as a pluggable backend via the `zap-stream-external` binary.
