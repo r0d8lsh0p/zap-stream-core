@@ -7,8 +7,9 @@ use async_trait::async_trait;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
-use axum::routing::{any};
-use axum::{Router};
+use axum::extract::Path;
+use axum::routing::{any, put};
+use axum::{Json, Router};
 use chrono::Utc;
 use nostr_sdk::{Client, Event, JsonUtil, Kind, NostrSigner, PublicKey, Tag, ToBech32};
 use nostr_sdk::prelude::Coordinate;
@@ -204,6 +205,18 @@ impl ViewerCountTracker {
             cache: Arc::new(RwLock::new(HashMap::new())),
             cache_duration,
         }
+    }
+
+    /// Inject a viewer count into the cache (test-only, bypasses Cloudflare API).
+    async fn set_cached_count(&self, stream_id: &str, count: u32) {
+        let mut cache = self.cache.write().await;
+        cache.insert(
+            stream_id.to_string(),
+            ViewerCountCache {
+                count,
+                timestamp: Instant::now(),
+            },
+        );
     }
 
     async fn get_viewer_count(&self, stream_id: &str, hls_url: &str) -> u32 {
@@ -511,7 +524,7 @@ impl CfApiWrapper {
 
     /// Create a router to handle api requests internally
     pub fn make_router(&self) -> Router {
-        Router::new()
+        let mut router = Router::new()
             .route(
                 Self::WEBHOOK_API_PATH,
                 any(
@@ -539,8 +552,45 @@ impl CfApiWrapper {
                         Ok(())
                     },
                 ),
-            )
-            .with_state(self.clone())
+            );
+
+        // Test-only endpoint: inject viewer count into the ViewerCountTracker
+        // cache, StreamManager, and reset the publish-throttle state so the next
+        // poller cycle treats this as a first-time publish. This lets e2e tests
+        // verify that non-zero viewer counts flow through to Nostr events without
+        // depending on Cloudflare's liveViewers API counting test HTTP fetches.
+        // Only available when ZS_TEST_MODE=1 is set in the environment.
+        if std::env::var("ZS_TEST_MODE").as_deref() == Ok("1") {
+            info!("Test mode enabled: registering PUT /api/v1/test/viewer-count/:stream_id");
+            router = router.route(
+                "/api/v1/test/viewer-count/{stream_id}",
+                put(
+                    async move |Path(stream_id): Path<String>,
+                                State(this): State<Self>,
+                                Json(body): Json<serde_json::Value>| {
+                        let count = body["count"].as_u64().unwrap_or(0) as usize;
+                        // Inject into cache so poller reads this instead of hitting CF
+                        this.viewer_count_tracker
+                            .set_cached_count(&stream_id, count as u32)
+                            .await;
+                        // Set in stream manager so stream_to_event picks it up
+                        this.stream_manager
+                            .set_viewer_count(&stream_id, count)
+                            .await;
+                        // Reset publish-throttle state so the poller treats the
+                        // next cycle as a first-time publish for this stream
+                        this.viewer_count_states.write().await.remove(&stream_id);
+                        info!(
+                            "Test: injected viewer count for stream {} = {}",
+                            stream_id, count
+                        );
+                        Ok::<_, StatusCode>(Json(serde_json::json!({"ok": true, "stream_id": stream_id, "count": count})))
+                    },
+                ),
+            );
+        }
+
+        router.with_state(self.clone())
     }
 
     async fn handle_webhook(&self, payload: Bytes) -> Result<()> {

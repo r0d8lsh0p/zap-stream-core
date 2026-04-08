@@ -34,6 +34,7 @@ services:
       APP__DATABASE: "mysql://root:${DB_ROOT_PASSWORD}@db:3306/zap_stream?max_connections=2"
       APP__LISTEN_HTTP: "0.0.0.0:8080"
       RUST_LOG: info
+      ZS_TEST_MODE: "1"
     restart: unless-stopped
 
 volumes:

@@ -234,10 +234,38 @@ async fn e2e_single_user_lifecycle() {
     println!("[PASS] Step 11/{total_steps}: LIVE Nostr event verified");
 
     // ── Step 12: Viewer count via stream manager ──────────────────────
-    // The poller runs every 30s and publishes a LIVE event with current_participants.
-    // We poll the relay in a loop (every 5s, up to 45s) to catch the LIVE event
-    // before the stream ends and replaces it with an "ended" event.
-    println!("[TEST] Step 12/{total_steps}: Verify current_participants tag in Nostr event");
+    // Inject a non-zero viewer count via the test-only endpoint and verify it
+    // appears in the Nostr event. This proves the full A2 plumbing:
+    //   test endpoint → ViewerCountTracker cache → poller → StreamManager → Nostr event
+    // Cloudflare's liveViewers API doesn't count server-side HTTP fetches, so we
+    // inject the count directly to test the pipeline end-to-end.
+    println!("[TEST] Step 12/{total_steps}: Inject viewer count and verify current_participants >= 1");
+
+    let stream_id = nostr_relay::get_tag_value(live_event, "d")
+        .expect("LIVE event missing 'd' tag (stream_id)");
+    let http = reqwest::Client::new();
+    let inject_url = format!(
+        "http://localhost:{}/api/v1/test/viewer-count/{}",
+        config.api_port, stream_id
+    );
+    let inject_resp = http
+        .put(&inject_url)
+        .json(&serde_json::json!({"count": 5}))
+        .send()
+        .await
+        .expect("Failed to call test viewer-count endpoint");
+    assert!(
+        inject_resp.status().is_success(),
+        "Test viewer-count endpoint returned {}",
+        inject_resp.status()
+    );
+    println!(
+        "[INFO] Step 12/{total_steps}: Injected viewer count = 5 for stream {}",
+        stream_id
+    );
+
+    // Poll the relay until we see a LIVE event with current_participants >= 1.
+    // The poller runs every 30s; after injection it will read 5 from cache and publish.
     let mut viewer_count_found: Option<u32> = None;
     for attempt in 1..=9 {
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -252,8 +280,10 @@ async fn e2e_single_user_lifecycle() {
                 println!(
                     "[INFO] Step 12/{total_steps}: attempt {attempt}/9 — current_participants = {count}"
                 );
-                viewer_count_found = Some(count);
-                break;
+                if count >= 1 {
+                    viewer_count_found = Some(count);
+                    break;
+                }
             } else {
                 println!(
                     "[INFO] Step 12/{total_steps}: attempt {attempt}/9 — LIVE event found but no current_participants yet"
@@ -267,10 +297,10 @@ async fn e2e_single_user_lifecycle() {
     }
     assert!(
         viewer_count_found.is_some(),
-        "LIVE event never had 'current_participants' tag within 45s"
+        "current_participants never reached >= 1 within 45s after injecting count=5"
     );
     println!(
-        "[PASS] Step 12/{total_steps}: current_participants = {} (tag present and parseable)",
+        "[PASS] Step 12/{total_steps}: current_participants = {} (verified >= 1)",
         viewer_count_found.unwrap()
     );
 
