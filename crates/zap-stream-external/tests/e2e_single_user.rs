@@ -188,7 +188,7 @@ async fn e2e_single_user_lifecycle() {
 
     // ── Step 9: Stream via RTMPS ──────────────────────────────────────
     println!("[TEST] Step 9/{total_steps}: Stream via RTMPS to Cloudflare");
-    let mut ffmpeg = FfmpegStream::start_rtmps(rtmp_url, rtmp_key, 30, 1000).await;
+    let mut ffmpeg = FfmpegStream::start_rtmps(rtmp_url, rtmp_key, 120, 1000).await;
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(ffmpeg.is_running(), "FFmpeg died immediately");
     println!("[PASS] Step 9/{total_steps}: RTMPS stream started");
@@ -234,30 +234,45 @@ async fn e2e_single_user_lifecycle() {
     println!("[PASS] Step 11/{total_steps}: LIVE Nostr event verified");
 
     // ── Step 12: Viewer count via stream manager ──────────────────────
-    println!("[TEST] Step 12/{total_steps}: Viewer count appears in Nostr event");
-    let streaming_url = nostr_relay::get_tag_value(live_event, "streaming")
-        .expect("LIVE event missing streaming URL for viewer count test");
-    println!("[TEST] Step 12/{total_steps}: Fetching HLS URL to register as viewer: {}", streaming_url);
-    let http = reqwest::Client::new();
-    let _ = http.get(&streaming_url).send().await;
-    // Wait for poller (30s interval) + viewer count cache (30s TTL) to pick up the view
-    println!("[TEST] Step 12/{total_steps}: Waiting 40s for poller to pick up viewer count...");
-    tokio::time::sleep(Duration::from_secs(40)).await;
-    let events_after_view = relay.query_30311_events(since, None).await;
-    let latest_live = events_after_view
-        .iter()
-        .find(|e| nostr_relay::get_tag_value(e, "status").as_deref() == Some("live"))
-        .expect("No LIVE event after viewer count wait");
-    let viewer_count = nostr_relay::get_tag_value(latest_live, "current_participants");
-    println!(
-        "[INFO] Step 12/{total_steps}: current_participants = {:?}",
-        viewer_count
-    );
+    // The poller runs every 30s and publishes a LIVE event with current_participants.
+    // We poll the relay in a loop (every 5s, up to 45s) to catch the LIVE event
+    // before the stream ends and replaces it with an "ended" event.
+    println!("[TEST] Step 12/{total_steps}: Verify current_participants tag in Nostr event");
+    let mut viewer_count_found: Option<u32> = None;
+    for attempt in 1..=9 {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let poll_events = relay.query_30311_events(since, None).await;
+        if let Some(live_ev) =
+            poll_events
+                .iter()
+                .find(|e| nostr_relay::get_tag_value(e, "status").as_deref() == Some("live"))
+        {
+            if let Some(cp) = nostr_relay::get_tag_value(live_ev, "current_participants") {
+                let count: u32 = cp.parse().expect("current_participants is not a valid number");
+                println!(
+                    "[INFO] Step 12/{total_steps}: attempt {attempt}/9 — current_participants = {count}"
+                );
+                viewer_count_found = Some(count);
+                break;
+            } else {
+                println!(
+                    "[INFO] Step 12/{total_steps}: attempt {attempt}/9 — LIVE event found but no current_participants yet"
+                );
+            }
+        } else {
+            println!(
+                "[INFO] Step 12/{total_steps}: attempt {attempt}/9 — no LIVE event (stream may have ended)"
+            );
+        }
+    }
     assert!(
-        nostr_relay::has_tag(latest_live, "current_participants"),
-        "LIVE event missing 'current_participants' tag"
+        viewer_count_found.is_some(),
+        "LIVE event never had 'current_participants' tag within 45s"
     );
-    println!("[PASS] Step 12/{total_steps}: Viewer count present in Nostr event");
+    println!(
+        "[PASS] Step 12/{total_steps}: current_participants = {} (tag present and parseable)",
+        viewer_count_found.unwrap()
+    );
 
     // ── Step 13: End stream ───────────────────────────────────────────
     println!("[TEST] Step 13/{total_steps}: End stream and verify END webhooks");
