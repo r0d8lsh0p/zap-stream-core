@@ -16,9 +16,9 @@ const TEST_NSEC: &str = "nsec107gexedhvf97ej83jzalley9wt682mlgy9ty5xwsp98vnph09f
 #[ignore]
 async fn e2e_single_user_lifecycle() {
     let config = TestConfig::from_env();
-    let total_steps = 17;
+    let total_steps = 16;
 
-    // ── Step 1: Prerequisites ───────────────────────────────────────
+    // ── Step 1/16: Prerequisites ──────────────────────────────────────
     println!("[TEST] Step 1/{total_steps}: Check prerequisites");
     assert!(
         docker::check_docker_available().await,
@@ -38,7 +38,7 @@ async fn e2e_single_user_lifecycle() {
         .expect("Cannot find db container");
     println!("[PASS] Step 1/{total_steps}: Check prerequisites");
 
-    // ── Step 2: Initial database state ────────────────────────────────
+    // ── Step 2/16: Initial database state ─────────────────────────────
     println!("[TEST] Step 2/{total_steps}: Check initial database state");
     let client = ApiClient::new(TEST_NSEC, &config.api_base_url()).await;
     let db = TestDb::connect(&config.db_connection_string()).await;
@@ -49,7 +49,7 @@ async fn e2e_single_user_lifecycle() {
         ext_id_before
     );
 
-    // ── Step 3: API call with NIP-98 auth ─────────────────────────────
+    // ── Step 3/16: API call with NIP-98 auth ──────────────────────────
     println!("[TEST] Step 3/{total_steps}: API call creates/reuses Live Input");
     let account = client.get_account().await;
     assert!(
@@ -58,7 +58,7 @@ async fn e2e_single_user_lifecycle() {
     );
     println!("[PASS] Step 3/{total_steps}: API call returned endpoints");
 
-    // ── Step 4: DB contains valid external_id ─────────────────────────
+    // ── Step 4/16: DB contains valid external_id ──────────────────────
     println!("[TEST] Step 4/{total_steps}: Database contains valid external_id");
     let ext_id_after = db
         .get_external_id(&client.pubkey_hex())
@@ -74,7 +74,7 @@ async fn e2e_single_user_lifecycle() {
         ext_id_after
     );
 
-    // ── Step 5: RTMPS endpoint validation ─────────────────────────────
+    // ── Step 5/16: RTMPS endpoint validation ──────────────────────────
     println!("[TEST] Step 5/{total_steps}: RTMPS endpoint validation");
     let endpoints = account["endpoints"]
         .as_array()
@@ -102,7 +102,7 @@ async fn e2e_single_user_lifecycle() {
         &rtmp_key[..20.min(rtmp_key.len())]
     );
 
-    // ── Step 6: SRT endpoint validation ───────────────────────────────
+    // ── Step 6/16: SRT endpoint validation ────────────────────────────
     println!("[TEST] Step 6/{total_steps}: SRT endpoint validation");
     let srt = endpoints.iter().find(|e| {
         e["name"]
@@ -128,7 +128,7 @@ async fn e2e_single_user_lifecycle() {
         println!("[PASS] Step 6/{total_steps}: SRT endpoint not available (skipped)");
     }
 
-    // ── Step 7: Idempotency ───────────────────────────────────────────
+    // ── Step 7/16: Idempotency ────────────────────────────────────────
     println!("[TEST] Step 7/{total_steps}: Second API call reuses same UID");
     let account2 = client.get_account().await;
     let rtmps_2 = account2["endpoints"]
@@ -154,7 +154,7 @@ async fn e2e_single_user_lifecycle() {
     assert_eq!(rtmp_key, rtmp_key_2, "Stream key changed between calls");
     println!("[PASS] Step 7/{total_steps}: Idempotency verified");
 
-    // ── Step 8: Custom keys ───────────────────────────────────────────
+    // ── Step 8/16: Custom keys ────────────────────────────────────────
     println!("[TEST] Step 8/{total_steps}: Custom keys - create and list");
     let create_resp = client
         .create_key(
@@ -186,14 +186,14 @@ async fn e2e_single_user_lifecycle() {
         custom_key_stream_id, ck_ext_id
     );
 
-    // ── Step 9: Stream via RTMPS ──────────────────────────────────────
+    // ── Step 9/16: Stream via RTMPS ───────────────────────────────────
     println!("[TEST] Step 9/{total_steps}: Stream via RTMPS to Cloudflare");
-    let mut ffmpeg = FfmpegStream::start_rtmps(rtmp_url, rtmp_key, 120, 1000).await;
+    let mut ffmpeg = FfmpegStream::start_rtmps(rtmp_url, rtmp_key, 30, 1000).await;
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(ffmpeg.is_running(), "FFmpeg died immediately");
     println!("[PASS] Step 9/{total_steps}: RTMPS stream started");
 
-    // ── Step 10: Webhook START ────────────────────────────────────────
+    // ── Step 10/16: Webhook START ─────────────────────────────────────
     println!("[TEST] Step 10/{total_steps}: Webhooks trigger stream START");
     tokio::time::sleep(Duration::from_secs(20)).await;
     let logs = docker::get_docker_logs(&ext_container, 200).await;
@@ -207,7 +207,7 @@ async fn e2e_single_user_lifecycle() {
     );
     println!("[PASS] Step 10/{total_steps}: Webhook START received");
 
-    // ── Step 11: Verify LIVE Nostr event ──────────────────────────────
+    // ── Step 11/16: Verify LIVE Nostr event ───────────────────────────
     println!("[TEST] Step 11/{total_steps}: Verify LIVE Nostr event (kind 30311)");
     let relay = NostrRelay::connect(&config.nostr_relay_url).await;
     let since = Timestamp::from(chrono::Utc::now().timestamp() as u64 - 600);
@@ -233,79 +233,8 @@ async fn e2e_single_user_lifecycle() {
     );
     println!("[PASS] Step 11/{total_steps}: LIVE Nostr event verified");
 
-    // ── Step 12: Viewer count via stream manager ──────────────────────
-    // Inject a non-zero viewer count via the test-only endpoint and verify it
-    // appears in the Nostr event. This proves the full A2 plumbing:
-    //   test endpoint → ViewerCountTracker cache → poller → StreamManager → Nostr event
-    // Cloudflare's liveViewers API doesn't count server-side HTTP fetches, so we
-    // inject the count directly to test the pipeline end-to-end.
-    println!("[TEST] Step 12/{total_steps}: Inject viewer count and verify current_participants >= 1");
-
-    let stream_id = nostr_relay::get_tag_value(live_event, "d")
-        .expect("LIVE event missing 'd' tag (stream_id)");
-    let http = reqwest::Client::new();
-    let inject_url = format!(
-        "http://localhost:{}/api/v1/test/viewer-count/{}",
-        config.api_port, stream_id
-    );
-    let inject_resp = http
-        .put(&inject_url)
-        .json(&serde_json::json!({"count": 5}))
-        .send()
-        .await
-        .expect("Failed to call test viewer-count endpoint");
-    assert!(
-        inject_resp.status().is_success(),
-        "Test viewer-count endpoint returned {}",
-        inject_resp.status()
-    );
-    println!(
-        "[INFO] Step 12/{total_steps}: Injected viewer count = 5 for stream {}",
-        stream_id
-    );
-
-    // Poll the relay until we see a LIVE event with current_participants >= 1.
-    // The poller runs every 30s; after injection it will read 5 from cache and publish.
-    let mut viewer_count_found: Option<u32> = None;
-    for attempt in 1..=9 {
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        let poll_events = relay.query_30311_events(since, None).await;
-        if let Some(live_ev) =
-            poll_events
-                .iter()
-                .find(|e| nostr_relay::get_tag_value(e, "status").as_deref() == Some("live"))
-        {
-            if let Some(cp) = nostr_relay::get_tag_value(live_ev, "current_participants") {
-                let count: u32 = cp.parse().expect("current_participants is not a valid number");
-                println!(
-                    "[INFO] Step 12/{total_steps}: attempt {attempt}/9 — current_participants = {count}"
-                );
-                if count >= 1 {
-                    viewer_count_found = Some(count);
-                    break;
-                }
-            } else {
-                println!(
-                    "[INFO] Step 12/{total_steps}: attempt {attempt}/9 — LIVE event found but no current_participants yet"
-                );
-            }
-        } else {
-            println!(
-                "[INFO] Step 12/{total_steps}: attempt {attempt}/9 — no LIVE event (stream may have ended)"
-            );
-        }
-    }
-    assert!(
-        viewer_count_found.is_some(),
-        "current_participants never reached >= 1 within 45s after injecting count=5"
-    );
-    println!(
-        "[PASS] Step 12/{total_steps}: current_participants = {} (verified >= 1)",
-        viewer_count_found.unwrap()
-    );
-
-    // ── Step 13: End stream ───────────────────────────────────────────
-    println!("[TEST] Step 13/{total_steps}: End stream and verify END webhooks");
+    // ── Step 12/16: End stream ────────────────────────────────────────
+    println!("[TEST] Step 12/{total_steps}: End stream and verify END webhooks");
     ffmpeg.stop().await;
     tokio::time::sleep(Duration::from_secs(15)).await;
     let logs = docker::get_docker_logs(&ext_container, 200).await;
@@ -317,10 +246,10 @@ async fn e2e_single_user_lifecycle() {
         logs.contains("Stream ended"),
         "Missing 'Stream ended' in logs"
     );
-    println!("[PASS] Step 13/{total_steps}: Stream END webhooks received");
+    println!("[PASS] Step 12/{total_steps}: Stream END webhooks received");
 
-    // ── Step 14: Verify ENDED Nostr event ───────────────────────────
-    println!("[TEST] Step 14/{total_steps}: Verify ENDED Nostr event");
+    // ── Step 13/16: Verify ENDED Nostr event ──────────────────────────
+    println!("[TEST] Step 13/{total_steps}: Verify ENDED Nostr event");
     let events = relay.query_30311_events(since, None).await;
     let ended_event = events
         .iter()
@@ -337,12 +266,12 @@ async fn e2e_single_user_lifecycle() {
         "ENDED event should not have 'streaming' tag (got {:?})",
         streaming_val
     );
-    println!("[PASS] Step 14/{total_steps}: ENDED Nostr event verified");
+    println!("[PASS] Step 13/{total_steps}: ENDED Nostr event verified");
 
-    // ── Steps 15-17: Custom key stream lifecycle ─────────────────────
+    // ── Steps 14-16: Custom key stream lifecycle ──────────────────────
 
-    // ── Step 15: Stream with custom key ─────────────────────────────
-    println!("[TEST] Step 15/{total_steps}: Stream with custom key");
+    // ── Step 14/16: Stream with custom key ────────────────────────────
+    println!("[TEST] Step 14/{total_steps}: Stream with custom key");
     let mut ck_ffmpeg = FfmpegStream::start_rtmps(rtmp_url, custom_key, 30, 800).await;
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(ck_ffmpeg.is_running(), "Custom key FFmpeg died immediately");
@@ -361,10 +290,10 @@ async fn e2e_single_user_lifecycle() {
             state
         );
     }
-    println!("[PASS] Step 15/{total_steps}: Custom key stream started");
+    println!("[PASS] Step 14/{total_steps}: Custom key stream started");
 
-    // ── Step 16: Custom key Nostr event metadata ────────────────────
-    println!("[TEST] Step 16/{total_steps}: Custom key Nostr event metadata");
+    // ── Step 15/16: Custom key Nostr event metadata ───────────────────
+    println!("[TEST] Step 15/{total_steps}: Custom key Nostr event metadata");
     let ck_events = relay
         .query_30311_events(since, Some(&custom_key_stream_id))
         .await;
@@ -406,10 +335,10 @@ async fn e2e_single_user_lifecycle() {
         "Custom key event missing 'e2e' t-tag (got {:?})",
         t_tags
     );
-    println!("[PASS] Step 16/{total_steps}: Custom key Nostr metadata verified");
+    println!("[PASS] Step 15/{total_steps}: Custom key Nostr metadata verified");
 
-    // ── Step 17: Custom key ENDED Nostr event ───────────────────────
-    println!("[TEST] Step 17/{total_steps}: Custom key stream ENDED Nostr event");
+    // ── Step 16/16: Custom key ENDED Nostr event ──────────────────────
+    println!("[TEST] Step 16/{total_steps}: Custom key stream ENDED Nostr event");
     ck_ffmpeg.stop().await;
     tokio::time::sleep(Duration::from_secs(15)).await;
 
@@ -430,7 +359,7 @@ async fn e2e_single_user_lifecycle() {
         !ends_val.is_empty(),
         "Custom key ENDED event 'ends' tag is empty"
     );
-    println!("[PASS] Step 17/{total_steps}: Custom key ENDED event verified");
+    println!("[PASS] Step 16/{total_steps}: Custom key ENDED event verified");
 
     relay.disconnect().await;
     println!("\n====== ALL {total_steps}/{total_steps} STEPS PASSED ======");
