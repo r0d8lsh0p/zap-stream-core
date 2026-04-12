@@ -385,8 +385,12 @@ impl CfApiWrapper {
         }
     }
 
-    /// Resolve an existing recently-ended stream for reconnect, or create a new one.
-    /// Unified for all key types (primary and custom).
+    /// Resolve the stream to use when a user goes live.
+    ///
+    /// - **Custom keys**: always reuse the same stream row (UserStreamKey.stream_id),
+    ///   matching upstream behavior. The d-tag is the show's persistent identity.
+    /// - **Primary keys**: reconnect grace window (120s) resumes a recently-ended stream;
+    ///   otherwise creates a new stream with metadata from user defaults.
     async fn resolve_or_create_stream(
         &self,
         user: &User,
@@ -402,14 +406,36 @@ impl CfApiWrapper {
         };
         let endpoint = self.detect_endpoint(&conn, user.ingest_id).await?;
 
-        // Check for a recently-ended stream within the reconnect grace window
+        // Custom keys: always reuse the original stream row
+        if let Some(key_id) = stream_key_id {
+            let keys = self.db.get_user_stream_keys(user.id).await?;
+            let key_row = keys
+                .iter()
+                .find(|k| k.id == key_id)
+                .ok_or_else(|| anyhow!("Stream key row not found for id {}", key_id))?;
+            let stream_uuid = Uuid::parse_str(&key_row.stream_id)
+                .map_err(|e| anyhow!("Invalid stream key UUID {}: {}", key_row.stream_id, e))?;
+            let mut stream = self.db.get_stream(&stream_uuid).await?;
+
+            info!(
+                "Resuming fixed stream {} for custom key {} (user {})",
+                stream.id, key_id, user.id
+            );
+            stream.state = UserStreamState::Live;
+            stream.endpoint_id = Some(endpoint.id);
+            stream.starts = Utc::now();
+            stream.ends = None;
+            self.db.update_stream(&stream).await?;
+            self.register_input_mapping(&input.uid, &stream.id).await;
+            return Ok(stream);
+        }
+
+        // Primary keys: check for recently-ended stream within reconnect grace window
         if let Some(prev_stream) = self
             .db
             .get_user_latest_ended_stream(user.id)
             .await?
         {
-            // Only resume if the key type matches
-            let key_matches = prev_stream.stream_key_id == stream_key_id;
             let within_grace = prev_stream
                 .ends
                 .map(|e| {
@@ -420,7 +446,7 @@ impl CfApiWrapper {
                 })
                 .unwrap_or(false);
 
-            if key_matches && within_grace {
+            if within_grace {
                 info!(
                     "Resuming previous stream {} for user {} (within {}s grace window)",
                     prev_stream.id, user.id, Self::RECONNECT_WINDOW_SECONDS
@@ -435,62 +461,26 @@ impl CfApiWrapper {
             }
         }
 
-        // Grace window expired or no matching previous stream: create new.
-        // For custom keys, copy metadata from the canonical planned stream
-        // (created at key creation time via UserStreamKey.stream_id).
-        // For primary keys, use user defaults.
-        let metadata_source = if let Some(key_id) = stream_key_id {
-            let keys = self.db.get_user_stream_keys(user.id).await?;
-            if let Some(key_row) = keys.iter().find(|k| k.id == key_id) {
-                if let Ok(uuid) = Uuid::parse_str(&key_row.stream_id) {
-                    self.db.try_get_stream(&uuid).await?
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
+        // No grace window match: create new stream with user defaults
         let new_id = Uuid::new_v4();
         info!(
-            "Creating new stream {} for user {} (stream_key_id: {:?})",
-            new_id, user.id, stream_key_id
+            "Creating new stream {} for user {} (primary key)",
+            new_id, user.id
         );
-        let new_stream = if let Some(ref src) = metadata_source {
-            UserStream {
-                id: new_id.to_string(),
-                user_id: user.id,
-                starts: Utc::now(),
-                state: UserStreamState::Live,
-                endpoint_id: Some(endpoint.id),
-                title: src.title.clone(),
-                summary: src.summary.clone(),
-                image: src.image.clone(),
-                content_warning: src.content_warning.clone(),
-                goal: src.goal.clone(),
-                tags: src.tags.clone(),
-                stream_key_id,
-                ..Default::default()
-            }
-        } else {
-            UserStream {
-                id: new_id.to_string(),
-                user_id: user.id,
-                starts: Utc::now(),
-                state: UserStreamState::Live,
-                endpoint_id: Some(endpoint.id),
-                title: user.title.clone(),
-                summary: user.summary.clone(),
-                image: user.image.clone(),
-                content_warning: user.content_warning.clone(),
-                goal: user.goal.clone(),
-                tags: user.tags.clone(),
-                stream_key_id,
-                ..Default::default()
-            }
+        let new_stream = UserStream {
+            id: new_id.to_string(),
+            user_id: user.id,
+            starts: Utc::now(),
+            state: UserStreamState::Live,
+            endpoint_id: Some(endpoint.id),
+            title: user.title.clone(),
+            summary: user.summary.clone(),
+            image: user.image.clone(),
+            content_warning: user.content_warning.clone(),
+            goal: user.goal.clone(),
+            tags: user.tags.clone(),
+            stream_key_id: None,
+            ..Default::default()
         };
         self.db.insert_stream(&new_stream).await?;
         self.register_input_mapping(&input.uid, &new_stream.id).await;

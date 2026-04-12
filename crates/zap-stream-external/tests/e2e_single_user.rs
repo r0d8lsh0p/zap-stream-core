@@ -180,7 +180,7 @@ async fn e2e_single_user_lifecycle() {
         .expect("No stream_id on key entry")
         .to_string();
 
-    let ck_ext_id = db.get_custom_key_external_id_by_key(custom_key).await;
+    let ck_ext_id = db.get_custom_key_external_id(&custom_key_stream_id).await;
     println!(
         "[PASS] Step 8/{total_steps}: Custom key created (stream_id={}, ck_ext_id={:?})",
         custom_key_stream_id, ck_ext_id
@@ -283,17 +283,9 @@ async fn e2e_single_user_lifecycle() {
         "Missing live_input.connected webhook for custom key"
     );
 
-    // Look up the actual live stream ID from the DB — a new UUID is created each show,
-    // NOT the stale UserStreamKey.stream_id from key creation time.
-    let ck_key_id = db
-        .get_stream_key_id(custom_key)
-        .await
-        .expect("No stream_key_id found for custom key");
-    let ck_live_stream_id = db
-        .get_live_stream_id_for_key(ck_key_id)
-        .await
-        .expect("No live stream found for custom key");
-    println!("[INFO] Custom key live stream ID (d-tag): {}", ck_live_stream_id);
+    // Custom keys reuse the same stream row (and d-tag) every time.
+    let ck_live_stream_id = custom_key_stream_id.clone();
+    println!("[INFO] Custom key stream ID (d-tag): {}", ck_live_stream_id);
 
     if let Some(state) = db.get_stream_state(&ck_live_stream_id).await {
         assert!(

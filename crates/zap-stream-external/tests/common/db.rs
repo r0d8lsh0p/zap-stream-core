@@ -55,36 +55,4 @@ impl TestDb {
         row.and_then(|r| r.get::<Option<String>, _>("external_id"))
     }
 
-    /// Get the external_id from user_stream_key by the key string itself.
-    pub async fn get_custom_key_external_id_by_key(&self, key: &str) -> Option<String> {
-        let row =
-            sqlx::query("SELECT external_id FROM user_stream_key WHERE `key` = ? LIMIT 1")
-                .bind(key)
-                .fetch_optional(&self.pool)
-                .await
-                .expect("DB query failed");
-        row.and_then(|r| r.get::<Option<String>, _>("external_id"))
-    }
-
-    /// Get the ID of the currently live stream for a given stream_key_id.
-    pub async fn get_live_stream_id_for_key(&self, stream_key_id: u64) -> Option<String> {
-        let row = sqlx::query(
-            "SELECT id FROM user_stream WHERE stream_key_id = ? AND state = 2 ORDER BY starts DESC LIMIT 1",
-        )
-        .bind(stream_key_id)
-        .fetch_optional(&self.pool)
-        .await
-        .expect("DB query failed");
-        row.map(|r| r.get::<String, _>("id"))
-    }
-
-    /// Get the stream_key_id (user_stream_key.id) for a given key string.
-    pub async fn get_stream_key_id(&self, key: &str) -> Option<u64> {
-        let row = sqlx::query("SELECT id FROM user_stream_key WHERE `key` = ? LIMIT 1")
-            .bind(key)
-            .fetch_optional(&self.pool)
-            .await
-            .expect("DB query failed");
-        row.map(|r| r.get::<u64, _>("id"))
-    }
 }

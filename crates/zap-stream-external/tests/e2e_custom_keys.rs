@@ -127,10 +127,8 @@ async fn e2e_custom_key_management() {
     // ── Step 5/11: Cloudflare API direct validation ───────────────────
     println!("[TEST] Step 5/{total_steps}: Cloudflare API direct validation");
 
-    // Get the custom key's Cloudflare external_id by key string (not stream_id,
-    // which is stale after the first stream ends — a new stream UUID is created each show)
     let ck1_external_id = db
-        .get_custom_key_external_id_by_key(&key1)
+        .get_custom_key_external_id(&stream_id_1)
         .await
         .expect("No external_id in DB for custom key 1");
 
@@ -203,17 +201,10 @@ async fn e2e_custom_key_management() {
     // ── Step 8/11: LIVE Nostr event with custom metadata ──────────────
     println!("[TEST] Step 8/{total_steps}: LIVE Nostr event with custom metadata");
 
-    // Get the actual live stream ID from the DB — this is a NEW UUID created at stream start,
-    // NOT the stale UserStreamKey.stream_id from key creation time.
-    let ck1_key_id = db
-        .get_stream_key_id(&key1)
-        .await
-        .expect("No stream_key_id found for key1");
-    let live_stream_id = db
-        .get_live_stream_id_for_key(ck1_key_id)
-        .await
-        .expect("No live stream found for custom key 1");
-    println!("[INFO] Actual live stream ID (d-tag): {}", live_stream_id);
+    // Custom keys reuse the same stream row (and d-tag) every time they go live.
+    // The d-tag matches the stream_id from key creation.
+    let live_stream_id = stream_id_1.clone();
+    println!("[INFO] Custom key stream ID (d-tag): {}", live_stream_id);
 
     let relay = NostrRelay::connect(&config.nostr_relay_url).await;
     let since = Timestamp::from(chrono::Utc::now().timestamp() as u64 - 600);
