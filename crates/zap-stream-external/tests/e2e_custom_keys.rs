@@ -126,17 +126,20 @@ async fn e2e_custom_key_management() {
 
     // ── Step 5/11: Cloudflare API direct validation ───────────────────
     println!("[TEST] Step 5/{total_steps}: Cloudflare API direct validation");
+
+    // Get the custom key's Cloudflare external_id by key string (not stream_id,
+    // which is stale after the first stream ends — a new stream UUID is created each show)
+    let ck1_external_id = db
+        .get_custom_key_external_id_by_key(&key1)
+        .await
+        .expect("No external_id in DB for custom key 1");
+
     if let (Some(cf_token), Some(cf_account)) =
         (&config.cloudflare_api_token, &config.cloudflare_account_id)
     {
-        let ck_ext_id = db
-            .get_custom_key_external_id(&stream_id_1)
-            .await
-            .expect("No external_id for custom key 1");
-
         let cf_url = format!(
             "https://api.cloudflare.com/client/v4/accounts/{}/stream/live_inputs/{}",
-            cf_account, ck_ext_id
+            cf_account, ck1_external_id
         );
         let http = reqwest::Client::new();
         let cf_resp: serde_json::Value = http
@@ -163,12 +166,6 @@ async fn e2e_custom_key_management() {
 
     // ── Step 6/11: Stream using custom key 1 ──────────────────────────
     println!("[TEST] Step 6/{total_steps}: Stream using custom key 1");
-
-    // Get the custom key's Cloudflare external_id so we can assert on it specifically
-    let ck1_external_id = db
-        .get_custom_key_external_id(&stream_id_1)
-        .await
-        .expect("No external_id in DB for custom key 1");
     println!("[INFO] Custom key 1 external_id (CF Live Input): {}", ck1_external_id);
 
     // Capture log baseline before streaming so we only check NEW log entries
@@ -205,6 +202,19 @@ async fn e2e_custom_key_management() {
 
     // ── Step 8/11: LIVE Nostr event with custom metadata ──────────────
     println!("[TEST] Step 8/{total_steps}: LIVE Nostr event with custom metadata");
+
+    // Get the actual live stream ID from the DB — this is a NEW UUID created at stream start,
+    // NOT the stale UserStreamKey.stream_id from key creation time.
+    let ck1_key_id = db
+        .get_stream_key_id(&key1)
+        .await
+        .expect("No stream_key_id found for key1");
+    let live_stream_id = db
+        .get_live_stream_id_for_key(ck1_key_id)
+        .await
+        .expect("No live stream found for custom key 1");
+    println!("[INFO] Actual live stream ID (d-tag): {}", live_stream_id);
+
     let relay = NostrRelay::connect(&config.nostr_relay_url).await;
     let since = Timestamp::from(chrono::Utc::now().timestamp() as u64 - 600);
 
@@ -212,14 +222,14 @@ async fn e2e_custom_key_management() {
     let mut events = Vec::new();
     for attempt in 1..=6 {
         events = relay
-            .query_30311_events(since, Some(&stream_id_1))
+            .query_30311_events(since, Some(&live_stream_id))
             .await;
         if !events.is_empty() {
             break;
         }
         println!(
             "  [WAIT] Attempt {}/6: no event with d-tag={} yet, retrying in 5s...",
-            attempt, stream_id_1
+            attempt, live_stream_id
         );
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
@@ -227,18 +237,18 @@ async fn e2e_custom_key_management() {
     assert!(
         !events.is_empty(),
         "No kind 30311 events with d-tag={} after 30s of polling",
-        stream_id_1,
+        live_stream_id,
     );
 
     let live_event = events
         .iter()
         .find(|e| {
-            nostr_relay::get_tag_value(e, "d").as_deref() == Some(stream_id_1.as_str())
+            nostr_relay::get_tag_value(e, "d").as_deref() == Some(live_stream_id.as_str())
                 && nostr_relay::get_tag_value(e, "status").as_deref() == Some("live")
         })
         .expect(&format!(
             "No LIVE kind 30311 event with d-tag={} (found {} events, statuses: {:?})",
-            stream_id_1,
+            live_stream_id,
             events.len(),
             events
                 .iter()
@@ -307,17 +317,17 @@ async fn e2e_custom_key_management() {
     // ── Step 10/11: ENDED Nostr event ─────────────────────────────────
     println!("[TEST] Step 10/{total_steps}: ENDED Nostr event for custom key");
     let events = relay
-        .query_30311_events(since, Some(&stream_id_1))
+        .query_30311_events(since, Some(&live_stream_id))
         .await;
     let ended_event = events
         .iter()
         .find(|e| {
-            nostr_relay::get_tag_value(e, "d").as_deref() == Some(&stream_id_1)
+            nostr_relay::get_tag_value(e, "d").as_deref() == Some(&live_stream_id.as_str())
                 && nostr_relay::get_tag_value(e, "status").as_deref() == Some("ended")
         })
         .expect(&format!(
             "No ENDED event with d-tag={} (found {} events)",
-            stream_id_1,
+            live_stream_id,
             events.len()
         ));
 

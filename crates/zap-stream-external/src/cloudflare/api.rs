@@ -435,26 +435,72 @@ impl CfApiWrapper {
             }
         }
 
-        // Grace window expired or no matching previous stream: create new
+        // Grace window expired or no matching previous stream: create new.
+        // For custom keys, copy metadata from the most recent ended stream for this key.
+        // If no ended stream exists yet (first use), fall back to the original planned stream
+        // created at key creation time. For primary keys, use user defaults.
+        let metadata_source = if let Some(key_id) = stream_key_id {
+            let from_ended = self
+                .db
+                .get_user_latest_ended_stream(user.id)
+                .await?
+                .filter(|s| s.stream_key_id == stream_key_id);
+            if from_ended.is_some() {
+                from_ended
+            } else {
+                // First use: load the original planned stream via UserStreamKey.stream_id
+                let keys = self.db.get_user_stream_keys(user.id).await?;
+                if let Some(key_row) = keys.iter().find(|k| k.id == key_id) {
+                    if let Ok(uuid) = Uuid::parse_str(&key_row.stream_id) {
+                        self.db.try_get_stream(&uuid).await?
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let new_id = Uuid::new_v4();
         info!(
             "Creating new stream {} for user {} (stream_key_id: {:?})",
             new_id, user.id, stream_key_id
         );
-        let new_stream = UserStream {
-            id: new_id.to_string(),
-            user_id: user.id,
-            starts: Utc::now(),
-            state: UserStreamState::Live,
-            endpoint_id: Some(endpoint.id),
-            title: user.title.clone(),
-            summary: user.summary.clone(),
-            image: user.image.clone(),
-            content_warning: user.content_warning.clone(),
-            goal: user.goal.clone(),
-            tags: user.tags.clone(),
-            stream_key_id,
-            ..Default::default()
+        let new_stream = if let Some(ref src) = metadata_source {
+            UserStream {
+                id: new_id.to_string(),
+                user_id: user.id,
+                starts: Utc::now(),
+                state: UserStreamState::Live,
+                endpoint_id: Some(endpoint.id),
+                title: src.title.clone(),
+                summary: src.summary.clone(),
+                image: src.image.clone(),
+                content_warning: src.content_warning.clone(),
+                goal: src.goal.clone(),
+                tags: src.tags.clone(),
+                stream_key_id,
+                ..Default::default()
+            }
+        } else {
+            UserStream {
+                id: new_id.to_string(),
+                user_id: user.id,
+                starts: Utc::now(),
+                state: UserStreamState::Live,
+                endpoint_id: Some(endpoint.id),
+                title: user.title.clone(),
+                summary: user.summary.clone(),
+                image: user.image.clone(),
+                content_warning: user.content_warning.clone(),
+                goal: user.goal.clone(),
+                tags: user.tags.clone(),
+                stream_key_id,
+                ..Default::default()
+            }
         };
         self.db.insert_stream(&new_stream).await?;
         self.register_input_mapping(&input.uid, &new_stream.id).await;

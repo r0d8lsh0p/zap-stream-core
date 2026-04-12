@@ -180,7 +180,7 @@ async fn e2e_single_user_lifecycle() {
         .expect("No stream_id on key entry")
         .to_string();
 
-    let ck_ext_id = db.get_custom_key_external_id(&custom_key_stream_id).await;
+    let ck_ext_id = db.get_custom_key_external_id_by_key(custom_key).await;
     println!(
         "[PASS] Step 8/{total_steps}: Custom key created (stream_id={}, ck_ext_id={:?})",
         custom_key_stream_id, ck_ext_id
@@ -283,7 +283,19 @@ async fn e2e_single_user_lifecycle() {
         "Missing live_input.connected webhook for custom key"
     );
 
-    if let Some(state) = db.get_stream_state(&custom_key_stream_id).await {
+    // Look up the actual live stream ID from the DB — a new UUID is created each show,
+    // NOT the stale UserStreamKey.stream_id from key creation time.
+    let ck_key_id = db
+        .get_stream_key_id(custom_key)
+        .await
+        .expect("No stream_key_id found for custom key");
+    let ck_live_stream_id = db
+        .get_live_stream_id_for_key(ck_key_id)
+        .await
+        .expect("No live stream found for custom key");
+    println!("[INFO] Custom key live stream ID (d-tag): {}", ck_live_stream_id);
+
+    if let Some(state) = db.get_stream_state(&ck_live_stream_id).await {
         assert!(
             state == 2 || state == 3,
             "Custom key stream state should be Live(2) or Ended(3), got {}",
@@ -295,12 +307,12 @@ async fn e2e_single_user_lifecycle() {
     // ── Step 15/16: Custom key Nostr event metadata ───────────────────
     println!("[TEST] Step 15/{total_steps}: Custom key Nostr event metadata");
     let ck_events = relay
-        .query_30311_events(since, Some(&custom_key_stream_id))
+        .query_30311_events(since, Some(&ck_live_stream_id))
         .await;
     assert!(
         !ck_events.is_empty(),
         "No kind 30311 events for custom key stream_id={}",
-        custom_key_stream_id
+        ck_live_stream_id
     );
     let ck_event = &ck_events[0];
     let ck_status = nostr_relay::get_tag_value(ck_event, "status");
@@ -343,7 +355,7 @@ async fn e2e_single_user_lifecycle() {
     tokio::time::sleep(Duration::from_secs(15)).await;
 
     let ck_events = relay
-        .query_30311_events(since, Some(&custom_key_stream_id))
+        .query_30311_events(since, Some(&ck_live_stream_id))
         .await;
     let ck_ended = ck_events
         .iter()
