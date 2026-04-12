@@ -436,29 +436,19 @@ impl CfApiWrapper {
         }
 
         // Grace window expired or no matching previous stream: create new.
-        // For custom keys, copy metadata from the most recent ended stream for this key.
-        // If no ended stream exists yet (first use), fall back to the original planned stream
-        // created at key creation time. For primary keys, use user defaults.
+        // For custom keys, copy metadata from the canonical planned stream
+        // (created at key creation time via UserStreamKey.stream_id).
+        // For primary keys, use user defaults.
         let metadata_source = if let Some(key_id) = stream_key_id {
-            let from_ended = self
-                .db
-                .get_user_latest_ended_stream(user.id)
-                .await?
-                .filter(|s| s.stream_key_id == stream_key_id);
-            if from_ended.is_some() {
-                from_ended
-            } else {
-                // First use: load the original planned stream via UserStreamKey.stream_id
-                let keys = self.db.get_user_stream_keys(user.id).await?;
-                if let Some(key_row) = keys.iter().find(|k| k.id == key_id) {
-                    if let Ok(uuid) = Uuid::parse_str(&key_row.stream_id) {
-                        self.db.try_get_stream(&uuid).await?
-                    } else {
-                        None
-                    }
+            let keys = self.db.get_user_stream_keys(user.id).await?;
+            if let Some(key_row) = keys.iter().find(|k| k.id == key_id) {
+                if let Ok(uuid) = Uuid::parse_str(&key_row.stream_id) {
+                    self.db.try_get_stream(&uuid).await?
                 } else {
                     None
                 }
+            } else {
+                None
             }
         } else {
             None
