@@ -423,42 +423,50 @@ impl CfApiWrapper {
             );
             stream.state = UserStreamState::Live;
             stream.endpoint_id = Some(endpoint.id);
-            stream.starts = Utc::now();
             stream.ends = None;
             self.db.update_stream(&stream).await?;
             self.register_input_mapping(&input.uid, &stream.id).await;
             return Ok(stream);
         }
 
-        // Primary keys: check for recently-ended stream within reconnect grace window
-        if let Some(prev_stream) = self
-            .db
-            .get_user_latest_ended_stream(user.id)
-            .await?
-        {
-            let within_grace = prev_stream
-                .ends
-                .map(|e| {
-                    Utc::now()
-                        .timestamp()
-                        .abs_diff(e.timestamp())
-                        < Self::RECONNECT_WINDOW_SECONDS
-                })
-                .unwrap_or(false);
+        // Primary keys: reject if already live, check for reconnect grace window
+        let prev_streams = self.db.get_user_prev_streams(user.id).await?;
 
-            if within_grace {
-                info!(
-                    "Resuming previous stream {} for user {} (within {}s grace window)",
-                    prev_stream.id, user.id, Self::RECONNECT_WINDOW_SECONDS
-                );
-                let mut stream = prev_stream;
-                stream.state = UserStreamState::Live;
-                stream.endpoint_id = Some(endpoint.id);
-                stream.ends = None;
-                self.db.update_stream(&stream).await?;
-                self.register_input_mapping(&input.uid, &stream.id).await;
-                return Ok(stream);
-            }
+        if prev_streams.live_primary_count > 0 {
+            return Err(anyhow!(
+                "Primary key is already in use for user {}",
+                user.id
+            ));
+        }
+
+        let has_recent_stream = prev_streams
+            .last_ended
+            .map(|e| {
+                Utc::now()
+                    .timestamp()
+                    .abs_diff(e.timestamp())
+                    < Self::RECONNECT_WINDOW_SECONDS
+            })
+            .unwrap_or(false);
+
+        if has_recent_stream {
+            let prev_id = prev_streams
+                .last_stream_id
+                .ok_or_else(|| anyhow!("Expected previous stream id not found"))?;
+            let stream_uuid = Uuid::parse_str(&prev_id)
+                .map_err(|e| anyhow!("Invalid previous stream UUID {}: {}", prev_id, e))?;
+            let mut stream = self.db.get_stream(&stream_uuid).await?;
+
+            info!(
+                "Resuming previous stream {} for user {} (within {}s grace window)",
+                stream.id, user.id, Self::RECONNECT_WINDOW_SECONDS
+            );
+            stream.state = UserStreamState::Live;
+            stream.endpoint_id = Some(endpoint.id);
+            stream.ends = None;
+            self.db.update_stream(&stream).await?;
+            self.register_input_mapping(&input.uid, &stream.id).await;
+            return Ok(stream);
         }
 
         // No grace window match: create new stream with user defaults
