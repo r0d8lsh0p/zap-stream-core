@@ -250,6 +250,13 @@ impl ViewerCountTracker {
     }
 }
 
+/// Returns `true` if a duplicate `live_input.connected` webhook should be skipped
+/// because an active stream already exists for this Cloudflare input.
+/// Cloudflare delivers webhooks at-least-once, so duplicates are expected.
+fn should_skip_duplicate_webhook(mapped_stream: Option<&UserStream>) -> bool {
+    matches!(mapped_stream, Some(s) if s.state == UserStreamState::Live)
+}
+
 #[derive(Clone)]
 pub struct CfApiWrapper {
     /// Cloudflare API client
@@ -556,36 +563,6 @@ impl CfApiWrapper {
         }
     }
 
-    /// Fetch the correct Cloudflare Live Input for a given stream.
-    /// Custom key streams use the key's own external_id; primary key streams use the user's.
-    async fn fetch_live_input_for_stream(
-        &self,
-        user: &User,
-        stream: &UserStream,
-    ) -> Result<LiveInput> {
-        if let Some(key_id) = stream.stream_key_id {
-            let keys = self.db.get_user_stream_keys(user.id).await?;
-            let key_row = keys
-                .iter()
-                .find(|k| k.id == key_id)
-                .ok_or_else(|| anyhow!("Stream key row not found for id {}", key_id))?;
-            let external_id = key_row
-                .external_id
-                .as_ref()
-                .ok_or_else(|| anyhow!("Stream key {} has no external_id", key_id))?;
-            let response = self.client.get_live_input(external_id).await?;
-            if response.success {
-                return Ok(response.result);
-            }
-            bail!(
-                "Failed to fetch live input for stream key {}, error {:?}",
-                key_id,
-                response.errors.first()
-            );
-        }
-        self.fetch_user_live_input(user).await
-    }
-
     async fn get_user_live_input(&self, user: &User) -> Result<LiveInput> {
         let cache = self.live_input_cache.read().await;
         if let Some(input) = cache.get(&user.id) {
@@ -652,15 +629,41 @@ impl CfApiWrapper {
                         info!("Checking {} live streams..", live_streams.len());
                         for live_stream in live_streams {
                             let user = self.db.get_user(live_stream.user_id).await?;
-                            let input = match self.fetch_live_input_for_stream(&user, &live_stream).await {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    warn!("Failed to fetch live input for stream {} (user {}): {}", live_stream.id, live_stream.user_id, e);
+                            let input = if let Some(key_id) = live_stream.stream_key_id {
+                                // Custom key (show) — look up the key's Cloudflare input
+                                let key = match self.db.get_user_stream_key_by_id(key_id).await {
+                                    Ok(k) => k,
+                                    Err(e) => {
+                                        warn!("Failed to fetch stream key {} for stream {}: {}", key_id, live_stream.id, e);
+                                        continue;
+                                    }
+                                };
+                                let external_id = match key.external_id.as_ref() {
+                                    Some(id) => id,
+                                    None => {
+                                        warn!("Stream key {} has no external_id, skipping poll for stream {}", key_id, live_stream.id);
+                                        continue;
+                                    }
+                                };
+                                let response = self.client.get_live_input(external_id).await?;
+                                if response.success {
+                                    response.result
+                                } else {
+                                    warn!("Failed to fetch live input for stream key {}: {:?}", key_id, response.errors.first());
                                     continue;
+                                }
+                            } else {
+                                // Default key — existing behavior
+                                match self.fetch_user_live_input(&user).await {
+                                    Ok(r) => r,
+                                    Err(e) => {
+                                        warn!("Failed to fetch live input for user {}: {}", live_stream.user_id, e);
+                                        continue;
+                                    }
                                 }
                             };
                             if !input.status.as_ref().map(|s| s.is_connected()).unwrap_or(false) {
-                                warn!("Database sync issue, live stream is supposed to be live but cloudflare shows the status {:?}", input.status);
+                                warn!("Database sync issue, live stream {} is supposed to be live but cloudflare input {} shows the status {:?}", live_stream.id, input.uid, input.status);
                                 if let Err(e) = self.publish_stream_end(input).await {
                                     warn!("Failed to publish live input for user {}", e);
                                 }
@@ -671,15 +674,18 @@ impl CfApiWrapper {
                                         .viewer_count_tracker
                                         .get_viewer_count(&live_stream.id, &hls_url)
                                         .await;
+                                    // Feed viewer count into stream manager so stream_to_event picks it up
+                                    self.stream_manager
+                                        .set_viewer_count(&live_stream.id, viewer_count as usize)
+                                        .await;
                                     if self
                                         .should_publish_viewer_count(&live_stream.id, viewer_count)
                                         .await
                                     {
                                         let event = self
-                                            .publish_stream_event_with_viewer_count(
+                                            .publish_stream_event(
                                                 &live_stream,
                                                 &user,
-                                                Some(viewer_count),
                                             )
                                             .await?;
                                         let mut updated_stream = live_stream.clone();
@@ -834,6 +840,16 @@ impl CfApiWrapper {
     }
 
     async fn publish_stream_start(&self, input: LiveInput) -> Result<()> {
+        // Dedup guard: skip duplicate live_input.connected webhooks (CF delivers at-least-once)
+        let mapped = self.get_mapped_stream(&input.uid).await?;
+        if should_skip_duplicate_webhook(mapped.as_ref()) {
+            info!(
+                "Skipping duplicate live_input.connected webhook for input {}: stream {} is already Live",
+                input.uid, mapped.unwrap().id
+            );
+            return Ok(());
+        }
+
         let (user, stream_key_id) = self.resolve_user_and_key(&input).await?;
         let mut stream = self
             .resolve_or_create_stream(&user, &input, stream_key_id)
@@ -938,21 +954,10 @@ impl CfApiWrapper {
         Ok(None)
     }
 
-    async fn publish_stream_event_with_viewer_count(
-        &self,
-        stream: &UserStream,
-        user: &User,
-        viewer_count: Option<u32>,
-    ) -> Result<Event> {
-        self.publish_stream_event_full(stream, user, viewer_count, None)
-            .await
-    }
-
     async fn publish_stream_event_full(
         &self,
         stream: &UserStream,
         user: &User,
-        viewer_count: Option<u32>,
         download_url: Option<&str>,
     ) -> Result<Event> {
         let mut extra_tags = vec![
@@ -972,10 +977,6 @@ impl CfApiWrapper {
         if let Some(url) = download_url {
             extra_tags.push(Tag::parse(["download", url])?);
         }
-        if let Some(count) = viewer_count {
-            let count_str = count.to_string();
-            extra_tags.push(Tag::parse(["current_participants", count_str.as_str()])?);
-        }
         let alt_text = build_alt_text(&self.nostr_client, stream, &self.client_url).await?;
         let ev = self.n53.stream_to_event(stream, extra_tags, Some(alt_text)).await?;
         self.n53.publish(&ev).await?;
@@ -984,7 +985,7 @@ impl CfApiWrapper {
     }
 
     pub async fn publish_stream_event(&self, stream: &UserStream, user: &User) -> Result<Event> {
-        self.publish_stream_event_full(stream, user, None, None)
+        self.publish_stream_event_full(stream, user, None)
             .await
     }
 
@@ -994,7 +995,7 @@ impl CfApiWrapper {
         user: &User,
         download_url: Option<&str>,
     ) -> Result<Event> {
-        self.publish_stream_event_full(stream, user, None, download_url)
+        self.publish_stream_event_full(stream, user, download_url)
             .await
     }
 
@@ -1399,7 +1400,8 @@ mod tests {
     use super::{
         apply_custom_ingest_domain, apply_video_asset_to_stream, build_account_endpoints,
         build_alt_text, build_stream_key, get_download_url, resolve_client_url, resolve_tos_url,
-        select_ingest_endpoint, select_stream_for_video_asset, slugify_title, ViewerCountTracker,
+        select_ingest_endpoint, select_stream_for_video_asset, should_skip_duplicate_webhook,
+        slugify_title, ViewerCountTracker,
     };
     use crate::cloudflare::{LiveInput, Playback, RtmpsEndpoint, SrtEndpoint, VideoAssetStatus, VideoAssetWebhook};
     use mockito::Server;
@@ -1884,5 +1886,37 @@ mod tests {
         assert!(first > 0);
         assert_eq!(first, second);
         mock.assert_async().await;
+    }
+
+    #[test]
+    fn skip_duplicate_when_stream_is_live() {
+        let stream = UserStream {
+            state: UserStreamState::Live,
+            ..sample_stream()
+        };
+        assert!(should_skip_duplicate_webhook(Some(&stream)));
+    }
+
+    #[test]
+    fn allow_webhook_when_no_mapped_stream() {
+        assert!(!should_skip_duplicate_webhook(None));
+    }
+
+    #[test]
+    fn allow_webhook_when_mapped_stream_ended() {
+        let stream = UserStream {
+            state: UserStreamState::Ended,
+            ..sample_stream()
+        };
+        assert!(!should_skip_duplicate_webhook(Some(&stream)));
+    }
+
+    #[test]
+    fn allow_webhook_when_mapped_stream_planned() {
+        let stream = UserStream {
+            state: UserStreamState::Planned,
+            ..sample_stream()
+        };
+        assert!(!should_skip_duplicate_webhook(Some(&stream)));
     }
 }
