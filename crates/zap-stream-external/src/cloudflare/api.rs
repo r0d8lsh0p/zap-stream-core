@@ -556,6 +556,36 @@ impl CfApiWrapper {
         }
     }
 
+    /// Fetch the correct Cloudflare Live Input for a given stream.
+    /// Custom key streams use the key's own external_id; primary key streams use the user's.
+    async fn fetch_live_input_for_stream(
+        &self,
+        user: &User,
+        stream: &UserStream,
+    ) -> Result<LiveInput> {
+        if let Some(key_id) = stream.stream_key_id {
+            let keys = self.db.get_user_stream_keys(user.id).await?;
+            let key_row = keys
+                .iter()
+                .find(|k| k.id == key_id)
+                .ok_or_else(|| anyhow!("Stream key row not found for id {}", key_id))?;
+            let external_id = key_row
+                .external_id
+                .as_ref()
+                .ok_or_else(|| anyhow!("Stream key {} has no external_id", key_id))?;
+            let response = self.client.get_live_input(external_id).await?;
+            if response.success {
+                return Ok(response.result);
+            }
+            bail!(
+                "Failed to fetch live input for stream key {}, error {:?}",
+                key_id,
+                response.errors.first()
+            );
+        }
+        self.fetch_user_live_input(user).await
+    }
+
     async fn get_user_live_input(&self, user: &User) -> Result<LiveInput> {
         let cache = self.live_input_cache.read().await;
         if let Some(input) = cache.get(&user.id) {
@@ -622,10 +652,10 @@ impl CfApiWrapper {
                         info!("Checking {} live streams..", live_streams.len());
                         for live_stream in live_streams {
                             let user = self.db.get_user(live_stream.user_id).await?;
-                            let input = match self.fetch_user_live_input(&user).await {
+                            let input = match self.fetch_live_input_for_stream(&user, &live_stream).await {
                                 Ok(r) => r,
                                 Err(e) => {
-                                    warn!("Failed to fetch live input for user {}: {}", live_stream.user_id, e);
+                                    warn!("Failed to fetch live input for stream {} (user {}): {}", live_stream.id, live_stream.user_id, e);
                                     continue;
                                 }
                             };
