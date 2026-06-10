@@ -37,6 +37,7 @@ client_url: "https://shosho.live/live"
 
 # Nostr relays to publish to
 relays:
+  - "wss://relay.shosho.live"
   - "wss://nos.lol"
   - "wss://relay.snort.social"
   - "wss://relay.damus.io"
