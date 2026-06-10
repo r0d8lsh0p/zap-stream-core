@@ -372,3 +372,161 @@ tmpdir=$(mktemp -d) && cd "$tmpdir" \
 
 - **Expected**: At least one webhook destination pointing to the correct URL, and one policy with `alert_type: stream_live_notifications` and `enabled: true`.
 - **Missing or wrong**: Follow the setup instructions in `docs/CLOUDFLARE_BACKEND.md` step 4.
+
+---
+
+## 6. Delete a test stream event from Nostr
+
+### When to use
+
+- After smoke testing on staging or local dev, to clean up test stream events from public relays
+- When a test 30311 event is visible on the network and should be removed
+
+### Primary method: API deletion with the host key
+
+The correct way to delete a stream is via the API using the **host's key** (the user who created the stream). This lets the server handle cleanup properly — database state, Cloudflare resources, and Nostr event deletion.
+
+```bash
+# Using the same nsec that created the stream:
+# Build a NIP-98 auth token for DELETE /api/v1/stream/<stream-uuid>
+# and call the endpoint
+```
+
+See procedure 7 (smoke test) for the full workflow. **This is why smoke tests must use a persistent test nsec** — if you use a throwaway key, you cannot delete the stream afterwards.
+
+### Fallback: Kind 5 deletion with the server nsec
+
+If the host key is lost, you can publish a NIP-09 kind 5 deletion request using the **server's nsec** (since the server authored the kind 30311 events). This is a fallback — it only removes the Nostr events, not the database or Cloudflare state.
+
+**Step 1: Identify the event**
+
+```bash
+nak req -k 30311 --author <server-pubkey> -t d=<stream-uuid> wss://nos.lol
+```
+
+**Step 2: Get the server nsec**
+
+```bash
+tmpdir=$(mktemp -d) && cd "$tmpdir" \
+  && railway link --project 6a3ef637-b5ac-4b7a-8c59-eafa71d9ff98 \
+     --environment Staging --service "ZS Core with CF Stream" \
+  && railway variables --json 2>&1 | python3 -c "import sys,json; print(json.load(sys.stdin)['APP__NSEC'])" \
+  && cd - >/dev/null && rm -rf "$tmpdir"
+```
+
+Change `--environment Staging` to `--environment Production` if deleting a prod event.
+
+**Step 3: Publish deletion**
+
+For replaceable events (kind 30311), use the `a` tag — it covers all versions of the event:
+
+```bash
+nak event --sec <nsec> -k 5 \
+  --tag a=30311:<server-pubkey>:<d-tag> \
+  --tag k=30311 \
+  -c "delete test stream" \
+  wss://nos.lol wss://relay.damus.io wss://relay.snort.social wss://relay.fountain.fm wss://relay.primal.net
+```
+
+**Step 4: Verify**
+
+```bash
+nak req -k 30311 --author <server-pubkey> -t d=<stream-uuid> \
+  wss://nos.lol wss://relay.damus.io wss://relay.snort.social wss://relay.fountain.fm wss://relay.primal.net
+```
+
+No output means the event has been deleted. Deletion is a request, not a guarantee — some relays may not honour it or may take time to process.
+
+### Notes
+
+- Always use the API (primary method) when possible — it cleans up DB + CF + Nostr together
+- The `a` tag format is `<kind>:<pubkey>:<d-tag>` — covers all versions of a replaceable event
+- The `e` tag only deletes a specific event ID, not other versions — use `a` for replaceable events
+- Always include `--tag k=30311` per NIP-09
+- The staging and production servers have different nsecs — use the right one
+- Do not expose the nsec in logs or output
+
+---
+
+## 7. Smoke test staging
+
+### When to use
+
+- After deploying to staging to verify the service works end-to-end
+- After config changes that affect API, webhooks, or Nostr publishing
+
+### Prerequisites
+
+- Staging is deployed and healthy (check logs with procedure 1, using `--environment Staging`)
+- `node` and `nak` installed locally
+- A **persistent test nsec** — do NOT use a throwaway key, as you need it to clean up afterwards
+
+### Procedure
+
+**Step 1: Create a test keypair (one-time)**
+
+Save a dedicated test nsec somewhere accessible. Generate one with:
+
+```bash
+nak key generate
+```
+
+Store the nsec — you will reuse it for all smoke tests.
+
+**Step 2: Get stream credentials via NIP-98 auth**
+
+```bash
+cd /tmp && mkdir -p zs-smoke && cd zs-smoke \
+  && npm init -y >/dev/null 2>&1 \
+  && npm install nostr-tools --silent 2>/dev/null
+
+cat > smoke.mjs << 'SCRIPT'
+import { finalizeEvent } from 'nostr-tools/pure';
+import * as nip19 from 'nostr-tools/nip19';
+
+const NSEC = process.env.SMOKE_NSEC;
+if (!NSEC) { console.error("Set SMOKE_NSEC env var"); process.exit(1); }
+const API = process.env.STAGING_URL || "https://staging.api.shosho.live/api/v1";
+
+const { data: sk } = nip19.decode(NSEC);
+const url = `${API}/account`;
+const event = finalizeEvent({
+  kind: 27235,
+  created_at: Math.floor(Date.now() / 1000),
+  tags: [["u", url], ["method", "GET"]],
+  content: "",
+}, sk);
+
+const token = Buffer.from(JSON.stringify(event)).toString('base64');
+const resp = await fetch(url, { headers: { "Authorization": `Nostr ${token}` } });
+const body = await resp.json();
+console.log("Status:", resp.status);
+console.log(JSON.stringify(body, null, 2));
+SCRIPT
+
+SMOKE_NSEC=<your-test-nsec> node smoke.mjs
+```
+
+**Step 3: Stream a test pattern (30 seconds)**
+
+```bash
+ffmpeg -re -f lavfi -i "testsrc=size=1280x720:rate=30" \
+  -f lavfi -i "sine=frequency=1000:sample_rate=44100" \
+  -c:v libx264 -preset veryfast -tune zerolatency \
+  -c:a aac -ar 44100 \
+  -f flv "rtmps://live.cloudflare.com:443/live/<stream-key>" \
+  -t 30
+```
+
+**Step 4: Verify in staging logs**
+
+Check for `live_input.connected`, `Published stream event`, stream poller showing 1 live stream, then after the stream ends: `live_input.disconnected`, `Stream ended`.
+
+**Step 5: Verify on Nostr and clean up**
+
+Query for the event, then delete it using procedure 6.
+
+### Notes
+
+- The staging and local dev environments share a Cloudflare account — the notification policy webhook can only point to one URL at a time. Only test one environment at a time.
+- Staging publishes to public Nostr relays — always clean up test events afterwards.

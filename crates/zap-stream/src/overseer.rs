@@ -4,14 +4,16 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use nostr_sdk::{
     Client, Event, EventBuilder, JsonUtil, Keys, Kind, Metadata, NostrSigner, Tag, Timestamp,
+    ToBech32,
 };
+use nostr_sdk::nips::nip01::Coordinate;
 use nwc::prelude::{NostrWalletConnect, NostrWalletConnectUri, PayInvoiceRequest};
 use payments_rs::lightning::{AddInvoiceRequest, LightningNode};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "hls")]
 use tokio::fs::remove_dir_all;
 use tokio::sync::RwLock;
@@ -42,7 +44,7 @@ use zap_stream_db::{
 #[cfg(feature = "hls")]
 use zap_stream_core::egress::hls::HLS_EGRESS_PATH;
 #[cfg(feature = "moq")]
-use zap_stream_core::hang::moq_lite::{OriginConsumer, OriginProducer, Produce};
+use zap_stream_core::hang::moq_lite::OriginProducer;
 use zap_stream_core::listen::ListenerEndpoint;
 #[cfg(feature = "hls")]
 use zap_stream_core::mux::HlsMuxer;
@@ -75,10 +77,9 @@ pub struct ZapStreamOverseer {
     out_dir: PathBuf,
     /// Last time the stream event was published
     last_event_publish: Arc<AtomicU64>,
-    last_view_counter: Arc<AtomicU32>,
     /// MoQ origin to push streams to
     #[cfg(feature = "moq")]
-    moq_origin: Option<Arc<Produce<OriginProducer, OriginConsumer>>>,
+    moq_origin: Option<OriginProducer>,
     /// MoQ socket address
     #[cfg(feature = "moq")]
     moq_bind: Option<std::net::SocketAddr>,
@@ -152,7 +153,6 @@ impl ZapStreamOverseer {
             nwc_topup_requests: Arc::new(RwLock::new(HashMap::new())),
             out_dir: PathBuf::from(&settings.output_dir),
             last_event_publish: Arc::new(AtomicU64::new(0)),
-            last_view_counter: Arc::new(AtomicU32::new(0)),
             #[cfg(feature = "moq")]
             moq_origin: None,
             #[cfg(feature = "moq")]
@@ -210,11 +210,7 @@ impl ZapStreamOverseer {
     }
 
     #[cfg(feature = "moq")]
-    pub fn set_moq_origin(
-        &mut self,
-        origin: Arc<Produce<OriginProducer, OriginConsumer>>,
-        bind: Option<std::net::SocketAddr>,
-    ) {
+    pub fn set_moq_origin(&mut self, origin: OriginProducer, bind: Option<std::net::SocketAddr>) {
         self.moq_origin = Some(origin);
         self.moq_bind = bind;
     }
@@ -256,7 +252,23 @@ impl ZapStreamOverseer {
             }
             _ => {}
         }
-        let ev = self.n53.stream_to_event(stream, extra_tags, None).await?;
+        let alt = if let Some(ref client_url) = self.settings.overseer.client_url {
+            let pubkey = self.client.signer().await?.get_public_key().await?;
+            let coord = Coordinate::new(Kind::LiveEvent, pubkey).identifier(&stream.id);
+            let naddr = nostr_sdk::nips::nip19::Nip19Coordinate {
+                coordinate: coord,
+                relays: vec![],
+            }
+            .to_bech32()?;
+            Some(format!(
+                "Watch live on {}/{}",
+                client_url.trim_end_matches('/'),
+                naddr
+            ))
+        } else {
+            None
+        };
+        let ev = self.n53.stream_to_event(stream, extra_tags, alt).await?;
         self.client.send_event(&ev).await?;
         info!("Published stream event {}", ev.id.to_hex());
         self.last_event_publish
@@ -440,17 +452,12 @@ impl Overseer for ZapStreamOverseer {
                     error!("Failed to end dead stream {}: {}", &id, e);
                 }
             } else {
-                // Stream is active, check if we should update viewer count in nostr event
+                // Stream is active - republish event at a fixed interval to keep viewer count fresh
                 let last_pub = self.last_event_publish.load(Ordering::Relaxed);
-                let last_view_counter = self.last_view_counter.load(Ordering::Relaxed);
-                let current_viewers = self.stream_manager.get_viewer_count(&stream.id).await;
-                if let Ok(user) = self.db.get_user(stream.user_id).await
-                    && current_viewers as u32 != last_view_counter
-                    && Timestamp::now().as_secs().saturating_sub(last_pub) > 60 * 5
+                if Timestamp::now().as_secs().saturating_sub(last_pub) > 60
+                    && let Ok(user) = self.db.get_user(stream.user_id).await
                 {
                     self.publish_stream_event(&stream, &user.pubkey).await?;
-                    self.last_view_counter
-                        .store(last_view_counter, Ordering::Relaxed);
                 }
             }
         }
@@ -977,7 +984,9 @@ impl EndpointConfigurator for ZapStreamOverseer {
         }
 
         #[cfg(feature = "moq")]
-        egress.push(EgressType::Moq { id: Uuid::new_v4() });
+        if self.moq_origin.is_some() {
+            egress.push(EgressType::Moq { id: Uuid::new_v4() });
+        }
         Ok(egress)
     }
 
@@ -986,7 +995,7 @@ impl EndpointConfigurator for ZapStreamOverseer {
         let Some(prod) = &self.moq_origin else {
             bail!("MoQ not configured")
         };
-        Ok(prod.producer.clone())
+        Ok(prod.clone())
     }
 }
 

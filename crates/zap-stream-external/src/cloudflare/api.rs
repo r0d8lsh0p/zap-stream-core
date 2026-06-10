@@ -10,7 +10,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{any};
 use axum::{Router};
 use chrono::Utc;
-use nostr_sdk::{Client, Event, JsonUtil, Kind, NostrSigner, PublicKey, Tag, ToBech32};
+use nostr_sdk::{Client, Event, JsonUtil, Kind, PublicKey, Tag, ToBech32};
 use nostr_sdk::prelude::Coordinate;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -30,6 +30,26 @@ use zap_stream::stream_manager::StreamManager;
 use zap_stream_api_common::*;
 use zap_stream_core::ingress::ConnectionInfo;
 use zap_stream_db::{IngestEndpoint, StreamKeyType, User, UserStream, UserStreamState, ZapStreamDb};
+
+/// Sentinel error: no live streams found for a user during stream-end processing.
+/// Used for downcast-based matching instead of string comparison.
+#[derive(Debug)]
+struct NoLiveStreams {
+    user_id: u64,
+    stream_key_id: Option<u64>,
+}
+
+impl std::fmt::Display for NoLiveStreams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "No live streams found for user {} (stream_key_id: {:?})",
+            self.user_id, self.stream_key_id
+        )
+    }
+}
+
+impl std::error::Error for NoLiveStreams {}
 
 fn select_ingest_endpoint<'a>(
     endpoints: &'a [IngestEndpoint],
@@ -117,8 +137,8 @@ fn build_stream_key(row: &zap_stream_db::UserStreamKey, key: String) -> StreamKe
 
 fn apply_video_asset_to_stream(stream: &mut UserStream, asset: &VideoAssetWebhook) -> bool {
     let mut changed = false;
-    if stream.external_id.as_deref() != Some(asset.uid.as_str()) {
-        stream.external_id = Some(asset.uid.clone());
+    if stream.external_video_id.as_deref() != Some(asset.uid.as_str()) {
+        stream.external_video_id = Some(asset.uid.clone());
         changed = true;
     }
     if stream.thumb.as_deref() != Some(asset.thumbnail.as_str()) {
@@ -150,7 +170,7 @@ fn slugify_title(title: &str) -> String {
 }
 
 /// Build the deterministic MP4 download URL from a video asset webhook.
-/// Returns None if the recording exceeds 4 hours (CloudFlare limit for MP4 downloads).
+/// Returns None if the recording exceeds 4 hours (Cloudflare limit for MP4 downloads).
 /// When a stream title is provided, appends `?filename=<slugified-title>` so the
 /// downloaded file has a meaningful name instead of `default.mp4`.
 fn get_download_url(asset: &VideoAssetWebhook, title: Option<&str>) -> Option<String> {
@@ -158,26 +178,23 @@ fn get_download_url(asset: &VideoAssetWebhook, title: Option<&str>) -> Option<St
     if asset.duration > MAX_DOWNLOAD_DURATION_SECS {
         return None;
     }
-    // Derive base URL from the HLS playback URL by replacing the path
-    if let Ok(mut url) = Url::parse(&asset.playback.hls) {
-        url.set_path(&format!("{}/downloads/default.mp4", asset.uid));
-        if let Some(t) = title {
-            let slug = slugify_title(t);
-            if !slug.is_empty() {
-                url.set_query(Some(&format!("filename={}", slug)));
-            }
+    // Extract the host from the HLS playback URL (e.g. customer-<hash>.cloudflarestream.com)
+    // and construct the download path from the asset UID directly.
+    let hls_url = Url::parse(&asset.playback.hls).ok()?;
+    let host = hls_url.host_str()?;
+    let scheme = hls_url.scheme();
+    let mut url = Url::parse(&format!(
+        "{}://{}/{}/downloads/default.mp4",
+        scheme, host, asset.uid
+    ))
+    .ok()?;
+    if let Some(t) = title {
+        let slug = slugify_title(t);
+        if !slug.is_empty() {
+            url.query_pairs_mut().append_pair("filename", &slug);
         }
-        Some(url.to_string())
-    } else {
-        None
     }
-}
-
-fn select_stream_for_video_asset(
-    matched: Option<UserStream>,
-    fallback: Option<UserStream>,
-) -> Option<UserStream> {
-    matched.or(fallback)
+    Some(url.to_string())
 }
 
 #[derive(Clone, Debug)]
@@ -204,6 +221,10 @@ impl ViewerCountTracker {
             cache: Arc::new(RwLock::new(HashMap::new())),
             cache_duration,
         }
+    }
+
+    async fn remove(&self, stream_id: &str) {
+        self.cache.write().await.remove(stream_id);
     }
 
     async fn get_viewer_count(&self, stream_id: &str, hls_url: &str) -> u32 {
@@ -293,6 +314,8 @@ pub struct CfApiWrapper {
     min_update_minutes: i64,
     /// Custom ingest domain (if configured)
     custom_ingest_domain: Option<String>,
+    /// Cached signer public key (static for lifetime of process)
+    signer_pubkey: PublicKey,
 }
 
 impl CfApiWrapper {
@@ -303,7 +326,7 @@ impl CfApiWrapper {
     /// Matches upstream ZapStreamOverseer::RECONNECT_WINDOW_SECONDS.
     const RECONNECT_WINDOW_SECONDS: u64 = 120;
 
-    pub fn new(
+    pub async fn new(
         token: CloudflareToken,
         db: ZapStreamDb,
         client: Client,
@@ -313,8 +336,9 @@ impl CfApiWrapper {
         endpoints_public_hostname: Option<String>,
         tos_url: Option<String>,
         client_url: Option<String>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let signer_pubkey = client.signer().await?.get_public_key().await?;
+        Ok(Self {
             client: CloudflareClient::new(token),
             nostr_client: client.clone(),
             api_base: ApiBase::new(db.clone(), client.clone(), lightning),
@@ -332,7 +356,8 @@ impl CfApiWrapper {
             viewer_count_states: Default::default(),
             min_update_minutes: 5,
             custom_ingest_domain: endpoints_public_hostname,
-        }
+            signer_pubkey,
+        })
     }
 
     fn input_map_ttl() -> Duration {
@@ -431,6 +456,7 @@ impl CfApiWrapper {
             stream.state = UserStreamState::Live;
             stream.endpoint_id = Some(endpoint.id);
             stream.ends = None;
+            stream.external_input_id = Some(input.uid.clone());
             self.db.update_stream(&stream).await?;
             self.register_input_mapping(&input.uid, &stream.id).await;
             return Ok(stream);
@@ -471,6 +497,7 @@ impl CfApiWrapper {
             stream.state = UserStreamState::Live;
             stream.endpoint_id = Some(endpoint.id);
             stream.ends = None;
+            stream.external_input_id = Some(input.uid.clone());
             self.db.update_stream(&stream).await?;
             self.register_input_mapping(&input.uid, &stream.id).await;
             return Ok(stream);
@@ -495,6 +522,7 @@ impl CfApiWrapper {
             goal: user.goal.clone(),
             tags: user.tags.clone(),
             stream_key_id: None,
+            external_input_id: Some(input.uid.clone()),
             ..Default::default()
         };
         self.db.insert_stream(&new_stream).await?;
@@ -504,24 +532,29 @@ impl CfApiWrapper {
     }
 
     async fn get_mapped_stream(&self, input_uid: &str) -> Result<Option<UserStream>> {
-        let mut map = self.input_stream_map.write().await;
-        let now = Instant::now();
-        let ttl = Self::input_map_ttl();
-        map.retain(|_, (_, created)| now.duration_since(*created) <= ttl);
-        let Some((stream_id, _)) = map.get(input_uid).cloned() else {
-            return Ok(None);
-        };
-        let stream_uuid = match Uuid::parse_str(&stream_id) {
-            Ok(id) => id,
-            Err(_) => {
-                map.remove(input_uid);
+        let stream_uuid = {
+            let mut map = self.input_stream_map.write().await;
+            let now = Instant::now();
+            let ttl = Self::input_map_ttl();
+            map.retain(|_, (_, created)| now.duration_since(*created) <= ttl);
+            let Some((stream_id, _)) = map.get(input_uid).cloned() else {
                 return Ok(None);
+            };
+            match Uuid::parse_str(&stream_id) {
+                Ok(id) => id,
+                Err(_) => {
+                    map.remove(input_uid);
+                    return Ok(None);
+                }
             }
-        };
+        }; // write lock dropped
+
         let stream = self.db.try_get_stream(&stream_uuid).await?;
+
         if stream.is_none() {
-            map.remove(input_uid);
+            self.input_stream_map.write().await.remove(input_uid);
         }
+
         Ok(stream)
     }
 
@@ -625,10 +658,22 @@ impl CfApiWrapper {
                         return Ok(());
                     },
                     _ = timer.tick() => {
-                       let live_streams = self.db.list_live_streams().await?;
+                       let live_streams = match self.db.list_live_streams().await {
+                            Ok(s) => s,
+                            Err(e) => {
+                                warn!("Poller: failed to list live streams: {}, will retry next tick", e);
+                                continue;
+                            }
+                        };
                         info!("Checking {} live streams..", live_streams.len());
                         for live_stream in live_streams {
-                            let user = self.db.get_user(live_stream.user_id).await?;
+                            let user = match self.db.get_user(live_stream.user_id).await {
+                                Ok(u) => u,
+                                Err(e) => {
+                                    warn!("Poller: failed to fetch user {} for stream {}: {}", live_stream.user_id, live_stream.id, e);
+                                    continue;
+                                }
+                            };
                             let input = if let Some(key_id) = live_stream.stream_key_id {
                                 // Custom key (show) — look up the key's Cloudflare input
                                 let key = match self.db.get_user_stream_key_by_id(key_id).await {
@@ -645,7 +690,13 @@ impl CfApiWrapper {
                                         continue;
                                     }
                                 };
-                                let response = self.client.get_live_input(external_id).await?;
+                                let response = match self.client.get_live_input(external_id).await {
+                                    Ok(r) => r,
+                                    Err(e) => {
+                                        warn!("Poller: failed to fetch live input for stream key {}: {}", key_id, e);
+                                        continue;
+                                    }
+                                };
                                 if response.success {
                                     response.result
                                 } else {
@@ -668,8 +719,18 @@ impl CfApiWrapper {
                                     warn!("Failed to publish live input for user {}", e);
                                 }
                             } else {
-                                self.ensure_tracking_live(&input, &user, &live_stream).await?;
-                                if let Some(hls_url) = self.get_streaming_url(&live_stream, &input)? {
+                                if let Err(e) = self.ensure_tracking_live(&input, &user, &live_stream).await {
+                                    warn!("Poller: failed to ensure tracking for stream {}: {}", live_stream.id, e);
+                                    continue;
+                                }
+                                let hls_url = match self.get_streaming_url(&live_stream, &input) {
+                                    Ok(url) => url,
+                                    Err(e) => {
+                                        warn!("Poller: failed to get streaming URL for stream {}: {}", live_stream.id, e);
+                                        continue;
+                                    }
+                                };
+                                if let Some(hls_url) = hls_url {
                                     let viewer_count = self
                                         .viewer_count_tracker
                                         .get_viewer_count(&live_stream.id, &hls_url)
@@ -682,15 +743,24 @@ impl CfApiWrapper {
                                         .should_publish_viewer_count(&live_stream.id, viewer_count)
                                         .await
                                     {
-                                        let event = self
-                                            .publish_stream_event(
-                                                &live_stream,
-                                                &user,
-                                            )
-                                            .await?;
-                                        let mut updated_stream = live_stream.clone();
-                                        updated_stream.event = Some(event.as_json());
-                                        self.db.update_stream(&updated_stream).await?;
+                                        match self
+                                            .publish_stream_event(&live_stream, &user)
+                                            .await
+                                        {
+                                            Ok(event) => {
+                                                let mut updated_stream = live_stream.clone();
+                                                updated_stream.event = Some(event.as_json());
+                                                if let Err(e) = self.db.update_stream(&updated_stream).await {
+                                                    warn!("Poller: failed to save viewer count update for stream {}: {}", live_stream.id, e);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                warn!(
+                                                    "Failed to publish viewer count update for stream {}: {}",
+                                                    live_stream.id, e
+                                                );
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -758,7 +828,7 @@ impl CfApiWrapper {
                             .await?;
                         match self.publish_stream_end(input).await {
                             Ok(()) => {}
-                            Err(e) if e.to_string().contains("No live streams found") => {
+                            Err(e) if e.downcast_ref::<NoLiveStreams>().is_some() => {
                                 info!("Disconnect webhook received but stream already ended (likely ended by poller): {}", e);
                             }
                             Err(e) => return Err(e),
@@ -776,36 +846,39 @@ impl CfApiWrapper {
                         "Cloudflare Video Asset ready for input_uid {}, recording: {} thumbnail: {}",
                         v.live_input, v.playback.hls, v.thumbnail
                     );
-                    let input = self.get_user_live_input_by_input_id(&v.live_input).await?;
-                    let user = if let Some(user) = self.db.get_user_by_external_id(&input.uid).await? {
-                        user
-                    } else if let Some(key) = self.db.get_user_stream_key_by_external_id(&input.uid).await? {
-                        self.db.get_user(key.user_id).await?
-                    } else {
-                        bail!("No user or stream key found with external_id {}", input.uid);
-                    };
-                    let matched = self.get_mapped_stream(&v.live_input).await?;
-                    let fallback = self.db.get_user_latest_ended_stream(user.id).await?;
-                    let Some(mut stream) =
-                        select_stream_for_video_asset(matched, fallback)
-                    else {
+                    // Look up the stream that was produced by this CF Live Input.
+                    // external_input_id is set at stream start, so this is a direct match.
+                    let Some(mut stream) = self.db.get_stream_by_external_input_id(&v.live_input).await? else {
                         warn!(
-                            "No ended streams found for user {}, skipping Video Asset update",
-                            user.id
+                            "No stream found for input {}, skipping Video Asset update",
+                            v.live_input
                         );
                         return Ok(());
                     };
-                    let user = if stream.user_id == user.id {
-                        user
-                    } else {
-                        self.db.get_user(stream.user_id).await?
-                    };
+                    let user = self.db.get_user(stream.user_id).await?;
                     let download_url = get_download_url(&v, stream.title.as_deref());
                     if let Some(ref url) = download_url {
-                        if let Err(e) = self.client.create_download(&v.uid).await {
-                            warn!("Failed to enable MP4 download for {}: {}", v.uid, e);
-                        } else {
-                            info!("Enabled MP4 download for video {}: {}", v.uid, url);
+                        let mut enabled = false;
+                        for attempt in 1..=3 {
+                            match self.client.create_download(&v.uid).await {
+                                Ok(_) => {
+                                    info!("Enabled MP4 download for video {}: {}", v.uid, url);
+                                    enabled = true;
+                                    break;
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "Failed to enable MP4 download for {} (attempt {}/3): {}",
+                                        v.uid, attempt, e
+                                    );
+                                    if attempt < 3 {
+                                        tokio::time::sleep(std::time::Duration::from_secs(2 * attempt)).await;
+                                    }
+                                }
+                            }
+                        }
+                        if !enabled {
+                            warn!("Giving up on MP4 download for {} after 3 attempts", v.uid);
                         }
                     }
                     if apply_video_asset_to_stream(&mut stream, &v) {
@@ -854,9 +927,26 @@ impl CfApiWrapper {
         let mut stream = self
             .resolve_or_create_stream(&user, &input, stream_key_id)
             .await?;
-        let stream_event = self.publish_stream_event(&stream, &user).await?;
-        stream.event = Some(stream_event.as_json());
-        self.db.update_stream(&stream).await?;
+
+        // Publish the "live" event to Nostr. If publish fails, roll back the DB
+        // row so we don't leave an orphaned Live stream with no Nostr event.
+        match self.publish_stream_event(&stream, &user).await {
+            Ok(stream_event) => {
+                stream.event = Some(stream_event.as_json());
+                self.db.update_stream(&stream).await?;
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to publish stream start for stream {}, rolling back: {}",
+                    stream.id, e
+                );
+                stream.state = UserStreamState::Ended;
+                stream.ends = Some(Utc::now());
+                self.db.update_stream(&stream).await?;
+                self.remove_input_mapping(&input.uid).await;
+                return Err(e);
+            }
+        }
         Ok(())
     }
 
@@ -896,25 +986,27 @@ impl CfApiWrapper {
         let mut stream = streams
             .into_iter()
             .find(|s| s.stream_key_id == stream_key_id)
-            .ok_or_else(|| {
-                anyhow!(
-                    "No live streams found for user {} (stream_key_id: {:?})",
-                    user.id,
-                    stream_key_id
-                )
+            .ok_or(NoLiveStreams {
+                user_id: user.id,
+                stream_key_id,
             })?;
 
-        self.stream_manager.remove_active_stream(&stream.id).await;
-        zap_stream_core::metrics::remove_playback_rate(&stream.id);
-
+        // Publish the "ended" event to Nostr before mutating any local state.
+        // If publish fails, DB still says Live and the poller will retry next cycle.
         stream.state = UserStreamState::Ended;
         stream.ends = Some(Utc::now());
         let event = self.publish_stream_event(&stream, &user).await?;
         stream.event = Some(event.as_json());
         self.db.update_stream(&stream).await?;
 
+        // Event published and DB updated — now clean up local state
+        self.stream_manager.remove_active_stream(&stream.id).await;
+        zap_stream_core::metrics::remove_playback_rate(&stream.id);
+
         info!("Stream ended {}", stream.id);
         self.remove_input_mapping(&input.uid).await;
+        self.viewer_count_states.write().await.remove(&stream.id);
+        self.viewer_count_tracker.remove(&stream.id).await;
         Ok(())
     }
 
@@ -943,8 +1035,8 @@ impl CfApiWrapper {
                 return Ok(Some(base_url.to_string()));
             }
             UserStreamState::Ended => {
-                // external_id will be the video id
-                if let Some(r) = &stream.external_id {
+                // external_video_id is the Cloudflare video/recording UID
+                if let Some(r) = &stream.external_video_id {
                     base_url.set_path(&format!("{}/manifest/video.m3u8", r));
                     return Ok(Some(base_url.to_string()));
                 }
@@ -977,7 +1069,7 @@ impl CfApiWrapper {
         if let Some(url) = download_url {
             extra_tags.push(Tag::parse(["download", url])?);
         }
-        let alt_text = build_alt_text(&self.nostr_client, stream, &self.client_url).await?;
+        let alt_text = build_alt_text(&self.signer_pubkey, stream, &self.client_url)?;
         let ev = self.n53.stream_to_event(stream, extra_tags, Some(alt_text)).await?;
         self.n53.publish(&ev).await?;
         info!("Published stream event {}", ev.id.to_hex());
@@ -1040,24 +1132,81 @@ impl CfApiWrapper {
             if webhooks.success {
                 if let Some(w) = webhooks.result {
                     if w.notification_url == url.as_str() {
-                        info!("Webhook notification url already registered: {}", url);
+                        info!("Stream webhook already registered: {}", url);
                         self.webhook_details.write().await.replace(w);
                         return Ok(());
                     }
-                    info!("Webhook URL mismatch, updating...");
-                } else {
-                    info!("No webhook registered, creating...");
                 }
-            } else {
-                info!("Webhook query unsuccessful, creating...");
             }
-        } else {
-            info!("Could not fetch existing webhook, creating...");
         }
 
         let wh = self.client.create_webhook(url.to_string().as_str()).await?;
-        info!("Webhook created for {}", wh.result.notification_url);
+        info!("Stream webhook updated: {}", wh.result.notification_url);
         self.webhook_details.write().await.replace(wh.result);
+        Ok(())
+    }
+
+    /// Ensure a Cloudflare Alerting notification policy exists for stream live
+    /// input events (connected/disconnected). This is a separate system from the
+    /// Stream webhook registered by `setup_webhook()`.
+    pub async fn setup_notification_policy(&self) -> Result<()> {
+        let mut url = Url::parse(&self.public_url)?;
+        url.set_path(Self::WEBHOOK_API_PATH);
+        let webhook_url = url.to_string();
+
+        // Step 1: Find or create an alerting webhook destination matching our URL
+        let destination_id = if let Ok(destinations) =
+            self.client.get_alerting_webhook_destinations().await
+        {
+            if let Some(dest) = destinations
+                .result
+                .iter()
+                .find(|d| d.url.as_deref() == Some(&webhook_url))
+            {
+                info!(
+                    "Notification destination already registered: {}",
+                    webhook_url
+                );
+                dest.id.clone()
+            } else {
+                let dest = self
+                    .client
+                    .create_alerting_webhook_destination("ZS Core Webhook", &webhook_url)
+                    .await?;
+                info!("Notification destination created: {}", webhook_url);
+                dest.result.id
+            }
+        } else {
+            let dest = self
+                .client
+                .create_alerting_webhook_destination("ZS Core Webhook", &webhook_url)
+                .await?;
+            info!("Notification destination created: {}", webhook_url);
+            dest.result.id
+        };
+
+        // Step 2: Find or create a notification policy for stream_live_notifications
+        // If a policy exists, update it to use our destination (handles switching
+        // between environments). If not, create one.
+        if let Ok(policies) = self.client.get_alerting_policies().await {
+            if let Some(policy) = policies
+                .result
+                .iter()
+                .find(|p| p.alert_type.as_deref() == Some("stream_live_notifications"))
+            {
+                // Update the existing policy to point to our destination
+                self.client
+                    .update_alerting_notification_policy(&policy.id, &destination_id)
+                    .await?;
+                info!("Notification policy updated: {}", webhook_url);
+                return Ok(());
+            }
+        }
+
+        self.client
+            .create_alerting_notification_policy("Stream Live Notifications", &destination_id)
+            .await?;
+        info!("Notification policy created: {}", webhook_url);
         Ok(())
     }
 }
@@ -1251,6 +1400,10 @@ impl ZapStreamApi for CfApiWrapper {
         let live_input_name = format!("{}-{}", pk.to_bech32()?, stream_id);
         let response = self.client.create_live_input(&live_input_name).await?;
         let input = response.result;
+        // If DB writes below fail, this CF Live Input becomes a "ghost" — it exists
+        // on Cloudflare but has no DB reference. This is intentional: ghost inputs are
+        // harmless (no quota cost, no billing), and deleting CF inputs risks breaking
+        // active stream key references that cannot be recovered.
 
         let mut new_stream = zap_stream_db::UserStream {
             id: stream_id.to_string(),
@@ -1324,9 +1477,8 @@ fn resolve_client_url(client_url: Option<&str>) -> String {
     }
 }
 
-async fn build_alt_text(client: &Client, stream: &UserStream, client_url: &str) -> Result<String> {
-    let pubkey = client.signer().await?.get_public_key().await?;
-    let coord = Coordinate::new(Kind::LiveEvent, pubkey).identifier(&stream.id);
+fn build_alt_text(pubkey: &PublicKey, stream: &UserStream, client_url: &str) -> Result<String> {
+    let coord = Coordinate::new(Kind::LiveEvent, *pubkey).identifier(&stream.id);
     Ok(format!(
         "Watch live on {}/{}",
         client_url,
@@ -1343,7 +1495,7 @@ mod tests {
     use super::{
         apply_custom_ingest_domain, apply_video_asset_to_stream, build_account_endpoints,
         build_alt_text, build_stream_key, get_download_url, resolve_client_url, resolve_tos_url,
-        select_ingest_endpoint, select_stream_for_video_asset, should_skip_duplicate_webhook,
+        select_ingest_endpoint, should_skip_duplicate_webhook,
         slugify_title, ViewerCountTracker,
     };
     use crate::cloudflare::{LiveInput, Playback, RtmpsEndpoint, SrtEndpoint, VideoAssetStatus, VideoAssetWebhook};
@@ -1418,7 +1570,8 @@ mod tests {
             endpoint_id: None,
             node_name: None,
             stream_key_id: None,
-            external_id: None,
+            external_video_id: None,
+            external_input_id: None,
         }
     }
 
@@ -1561,12 +1714,10 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn build_alt_text_uses_configured_client_url() {
+    #[test]
+    fn build_alt_text_uses_configured_client_url() {
         let keys = Keys::generate();
-        let client = nostr_sdk::ClientBuilder::new().signer(keys).build();
-        let alt_text = build_alt_text(&client, &sample_stream(), "https://client.example")
-            .await
+        let alt_text = build_alt_text(&keys.public_key(), &sample_stream(), "https://client.example")
             .unwrap();
 
         assert!(alt_text.starts_with("Watch live on https://client.example/"));
@@ -1591,7 +1742,7 @@ mod tests {
 
         let changed = apply_video_asset_to_stream(&mut stream, &asset);
         assert!(changed);
-        assert_eq!(stream.external_id.as_deref(), Some("video-uid"));
+        assert_eq!(stream.external_video_id.as_deref(), Some("video-uid"));
         assert_eq!(
             stream.thumb.as_deref(),
             Some("https://example.com/thumb.jpg")
@@ -1601,7 +1752,7 @@ mod tests {
     #[test]
     fn apply_video_asset_to_stream_is_idempotent() {
         let mut stream = UserStream {
-            external_id: Some("video-uid".to_string()),
+            external_video_id: Some("video-uid".to_string()),
             thumb: Some("https://example.com/thumb.jpg".to_string()),
             ..Default::default()
         };
@@ -1624,9 +1775,9 @@ mod tests {
     }
 
     #[test]
-    fn apply_video_asset_to_stream_updates_only_external_id() {
+    fn apply_video_asset_to_stream_updates_only_external_video_id() {
         let mut stream = UserStream {
-            external_id: Some("old-uid".to_string()),
+            external_video_id: Some("old-uid".to_string()),
             thumb: Some("https://example.com/thumb.jpg".to_string()),
             ..Default::default()
         };
@@ -1646,7 +1797,7 @@ mod tests {
 
         let changed = apply_video_asset_to_stream(&mut stream, &asset);
         assert!(changed);
-        assert_eq!(stream.external_id.as_deref(), Some("video-uid"));
+        assert_eq!(stream.external_video_id.as_deref(), Some("video-uid"));
         assert_eq!(
             stream.thumb.as_deref(),
             Some("https://example.com/thumb.jpg")
@@ -1656,7 +1807,7 @@ mod tests {
     #[test]
     fn apply_video_asset_to_stream_updates_only_thumb() {
         let mut stream = UserStream {
-            external_id: Some("video-uid".to_string()),
+            external_video_id: Some("video-uid".to_string()),
             thumb: Some("https://example.com/old.jpg".to_string()),
             ..Default::default()
         };
@@ -1676,7 +1827,7 @@ mod tests {
 
         let changed = apply_video_asset_to_stream(&mut stream, &asset);
         assert!(changed);
-        assert_eq!(stream.external_id.as_deref(), Some("video-uid"));
+        assert_eq!(stream.external_video_id.as_deref(), Some("video-uid"));
         assert_eq!(
             stream.thumb.as_deref(),
             Some("https://example.com/thumb.jpg")
@@ -1780,32 +1931,6 @@ mod tests {
         assert_eq!(slugify_title(""), "");
         assert_eq!(slugify_title("café & más"), "caf-m-s");
         assert_eq!(slugify_title("under_score test"), "under_score-test");
-    }
-
-    #[test]
-    fn select_stream_for_video_asset_prefers_matched() {
-        let matched = UserStream {
-            id: "matched".to_string(),
-            ..Default::default()
-        };
-        let fallback = UserStream {
-            id: "fallback".to_string(),
-            ..Default::default()
-        };
-
-        let selected = select_stream_for_video_asset(Some(matched), Some(fallback)).unwrap();
-        assert_eq!(selected.id, "matched");
-    }
-
-    #[test]
-    fn select_stream_for_video_asset_uses_fallback_when_missing() {
-        let fallback = UserStream {
-            id: "fallback".to_string(),
-            ..Default::default()
-        };
-
-        let selected = select_stream_for_video_asset(None, Some(fallback)).unwrap();
-        assert_eq!(selected.id, "fallback");
     }
 
     #[tokio::test]

@@ -6,7 +6,6 @@
 
 # Local development files
 docs/deploy/data/
-docs/deploy/config.local.external.yaml
 
 # Claude Code
 .claude/worktrees/

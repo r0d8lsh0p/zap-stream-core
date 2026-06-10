@@ -1,5 +1,13 @@
 # zap-stream-core (Shosho Fork)
 
+## CRITICAL: No destructive Cloudflare actions without explicit user approval
+
+**Never take any destructive action on Cloudflare resources without explicit user approval.** This includes deleting, modifying, or overwriting any resource via the Cloudflare API. Always ask first.
+
+**Cloudflare Live Inputs are especially dangerous to delete.** Dev and staging environments share the same Cloudflare account. Deleting a live input is irreversible — there is no undo, no trash, no restore. The database stores `external_id` references to live inputs. If a live input is deleted from Cloudflare, every user and custom stream key that referenced it is permanently broken. The server can self-heal default user inputs on the next API call, but custom key inputs and any active streams are destroyed with no recovery path. If test data accumulates on Cloudflare, leave it.
+
+---
+
 ## What this is
 
 A fork of [v0l/zap-stream-core](https://github.com/v0l/zap-stream-core) — a Rust backend for live streaming on Nostr. Our fork adds Cloudflare Stream as a pluggable backend via the `zap-stream-external` binary.
@@ -26,27 +34,33 @@ Key source files in `zap-stream-external`:
 ## Branch strategy
 
 ```
-upstream/main (read-only, fetch only)
+dev/external               <-- daily work, local testing
+                               Railway staging auto-deploys from this branch
   |
-  v
-integration/external   <-- clean commits for upstream submission
-  |                        NO Railway config, NO agent files
+  ├── PR + merge ────────► railway/external       <-- production deployment
+  |                            Pushes to origin auto-deploy production
   |
-  v  (cherry-pick)
-railway/external       <-- production deployment branch
-                           Railway config (railway.toml) + AGENTS.md
-                           Pushes to origin auto-deploy production
+  └── cherry-pick code ──► integration/external   <-- upstream PRs to v0l/zap-stream-core
+                               NO Railway config, NO agent files, NO local dev tooling
 ```
 
 ### Branch rules
 
-- **`integration/external`** — upstream-submittable code only. No local config, no agent docs, no secrets. Every commit here should be suitable for a PR to `v0l/zap-stream-core`.
-- **`railway/external`** — `integration/external` + Railway-specific commits on top. Must always be a clean superset of `integration/external`.
-- **Feature branches / worktrees** — branch from `integration/external` for new work.
+- **`dev/external`** — the daily working branch. Feature branches are created from here. Railway staging is connected to this branch; pushing deploys staging automatically.
+- **`railway/external`** — production deployment branch. Receives PRs from `dev/external`. **Pushing to origin auto-deploys production.** Never push without explicit user approval.
+- **`integration/external`** — upstream-submittable code only. No Railway config, no agent docs, no local dev tooling, no secrets. Every commit here should be suitable for a PR to `v0l/zap-stream-core`. Receives cherry-picked code-only commits from `dev/external`.
 
-### Allowed divergences on `railway/external`
+### Relationship between branches
 
-`railway/external` must contain every commit from `integration/external` (via cherry-pick), plus ONLY these categories of railway-specific additions:
+`dev/external` and `railway/external` have **identical code**. The only difference is:
+- `dev/external` pushes deploy **staging** (safe, test freely)
+- `railway/external` pushes deploy **production** (dangerous, human approval required)
+
+`integration/external` is a **strict subset** — it contains only code that is suitable for upstream. All Railway-specific files, local dev tooling, and agent docs are excluded.
+
+### Allowed divergences on `dev/external` and `railway/external`
+
+These branches contain every commit from `integration/external`, plus ONLY these categories of additions:
 
 | Category | Files |
 |----------|-------|
@@ -54,11 +68,13 @@ railway/external       <-- production deployment branch
 | Dockerfile config path | `crates/zap-stream-external/Dockerfile` — COPY line changed to use `config.railway.external.yaml` |
 | Structured JSON logging | `crates/zap-stream-external/src/main.rs` (`LOG_FORMAT=json` support), `Cargo.toml` (`json` feature on tracing-subscriber) |
 | Production data migration | `crates/zap-stream-db/migrations/20260224000000_migrate_cf_uid_to_external_id.sql` — one-time migration already applied to prod DB. **Cannot be deleted** because SQLx will crash on startup if a previously-applied migration file is missing. |
+| Local dev config | `docs/deploy/config.local.external.yaml` — local dev config with test relay, secrets commented out |
+| Local dev docker compose | `docs/deploy/docker-compose.override.yml` — self-contained compose for local dev testing |
+| Local dev automation | `docs/deploy/dev.sh` — script to automate tunnel + docker + test workflow (planned) |
+| Gitignore additions | `.gitignore` — entries for `.env`, local dev data |
 | Agent documentation | `AGENTS.md`, `notes/` |
 
-**If a commit exists on `integration/external`, it MUST also be on `railway/external`.** Missing cherry-picks mean production is running different code than what's in the upstream PR.
-
-**If a divergence doesn't fit one of the categories above, it probably belongs on `integration/external` instead.** Ask before adding new railway-only code changes.
+**If a divergence doesn't fit one of the categories above, it probably belongs on `integration/external` instead.** Ask before adding new divergences.
 
 ### CRITICAL: Production safety
 
@@ -66,33 +82,19 @@ railway/external       <-- production deployment branch
 
 ## Git ops workflow
 
-1. **Agent works on a worktree** branched from `integration/external`
+1. **Agent works on `dev/external`** (or a feature branch from it)
 2. **Run cargo tests** — `cargo test -p zap-stream-external` and `cargo test -p zap-stream-db`
-3. **User reviews and tests** the worktree changes
-4. **Squash-merge** the worktree branch into `integration/external`
-5. **Cherry-pick** that single squash commit into `railway/external`
-6. **Push `integration/external`** to the open PR on the upstream repo (user approval required)
-7. **Push `railway/external`** to deploy production (user approval required)
+3. **Run local Docker E2E tests** — see "Local dev test environment" below
+4. **Push `dev/external`** — auto-deploys staging, manual smoke test to verify
+5. **PR from `dev/external` to `railway/external`** — deploys production (user approval required)
+6. **Cherry-pick** code-only commits to `integration/external` for upstream PRs
 
-### Creating a worktree
+### Local worktrees
 
-```bash
-cd /Users/visitor/projects/zap-stream/zap-stream-core
-git worktree add ../zap-stream-wt-<issue>  integration/external -b feature/<issue>-<description>
-```
-
-### Merging back
-
-```bash
-# Squash into integration/external
-git checkout integration/external
-git merge --squash feature/<issue>-<description>
-git commit -m "Description of change (closes #NNN)"
-
-# Cherry-pick into railway/external
-git checkout railway/external
-git cherry-pick <squash-commit-hash>
-```
+| Directory | Branch | Purpose |
+|-----------|--------|---------|
+| `zap-stream-core-fork/` | `dev/external` | Daily workspace, local dev testing |
+| `zap-stream-external/` | `integration/external` | Upstream PR clean room (legacy, may be removed) |
 
 ## Testing
 
@@ -109,19 +111,53 @@ cargo test
 
 ### Local dev test environment
 
-A persistent worktree at `/Users/visitor/projects/zap-stream/zap-stream-external` is used for local integration testing with Docker. This worktree has local dev configuration — **never commit local config changes from this worktree back to `integration/external`**.
+Local integration testing uses Docker Compose with a self-contained override file. The setup lives in `docs/deploy/`:
 
-See `notes/CRITICAL-GIT-STRATEGY.md` for the full pre-commit checklist including Docker integration tests and stream start/end verification.
+| File | Tracked? | Purpose |
+|------|----------|---------|
+| `docker-compose.override.yml` | Yes | Self-contained compose: MariaDB + external binary built from source |
+| `config.local.external.yaml` | Yes | Local config: test relay (`ws://host.docker.internal:3334`), secrets commented out |
+| `.env` | **No** (gitignored) | Local secrets: CF token, nsec, tunnel URL, DB password |
+| `config.railway.external.yaml` | Yes | Production config baked into Docker image by Railway |
+
+**Setup (one-time):**
+1. Copy `.env` template and fill in real values (CF dev account credentials, dev nsec)
+2. Ensure the local Nostr relay is running on port 3334
+
+**Testing workflow:**
+1. Start cloudflared tunnel: `nohup cloudflared tunnel --url http://localhost:8090 > /tmp/cloudflared-dev.log 2>&1 &`
+2. Capture tunnel URL: `grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/cloudflared-dev.log`
+3. Update `APP__PUBLIC_URL` in `.env` with the tunnel URL
+4. Start stack: `cd docs/deploy && docker compose -f docker-compose.override.yml up --build -d`
+5. Check logs: `docker compose -f docker-compose.override.yml logs -f zap-stream-external`
+6. Run E2E tests: `ZS_API_PORT=8090 DB_ROOT_PASSWORD=devpass123 cargo test -p zap-stream-external -- --ignored --nocapture`
+7. Stop: `docker compose -f docker-compose.override.yml down`
+
+**Key design points:**
+- The override is self-contained — run it alone, do NOT merge with `docker-compose.external.yaml`
+- `config.local.external.yaml` is mounted into the container, replacing the baked-in railway config
+- Secrets are loaded from `.env` via `env_file` — never hardcoded in tracked files
+- The local relay at `ws://host.docker.internal:3334` ensures Nostr events stay isolated from the public network
+- Cloudflare API calls are external by design (testing a real CF integration)
+- Port 8090 on host maps to 8080 in container (8080 is often occupied by other services)
+
+See `crates/zap-stream-external/tests/TESTING_README.md` for the full E2E test playbook.
 
 ## Git safety
 
-Read `notes/CRITICAL-GIT-STRATEGY.md` before any git operations. Key points:
-
-- **Each branch has its own `.gitignore`** — files safe on one branch may be exposed on another
-- **Never `git add .` on upstream-based branches** — our `.gitignore` additions may not exist
+- **Never push `railway/external` without user approval** — auto-deploys production
+- **Never `git add .` on `integration/external`** — its `.gitignore` is minimal (upstream-compatible), local files may be exposed
 - **Never `git add -f`** to bypass `.gitignore` without explicit user approval
-- **Never push upstream-based branches** — keep them local only
 - **Verify branch before any push**: `git branch --show-current`
+- **Each branch has its own `.gitignore`** — files safe on one branch may be exposed on another
+
+## Operations & Railway access
+
+Read `notes/operating-procedures.md` for all operational procedures. Key procedures:
+
+- **Railway logs and env vars**: Use the temp directory pattern with `railway link`. Project ID, service name, and examples are in the `railway-logs` skill (`.claude/skills/railway-logs/SKILL.md`) and in `notes/operating-procedures.md` procedure 1.
+- **Nostr event operations**: Use `nak` with the server nsec and `a` tag for working with replaceable events. e.g. see procedure 6.
+- **Staging smoke test**: Use a persistent test nsec (not throwaway), clean up test events afterwards. See procedure 7.
 
 ## Deployment & Configuration
 

@@ -1,0 +1,40 @@
+# Local dev compose for zap-stream-external (self-contained)
+#
+# Usage: docker compose -f docker-compose.override.yml up --build -d
+#
+# Builds from source, mounts local config, reads secrets from .env.
+# Railway ignores this file entirely (it uses railway.toml + Dockerfile).
+
+services:
+  db:
+    image: mariadb:latest
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MARIADB_DATABASE: zap_stream
+    ports:
+      - "3306:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+    restart: unless-stopped
+
+  zap-stream-external:
+    build:
+      context: ../..
+      dockerfile: crates/zap-stream-external/Dockerfile
+    image: zap-stream-external:local
+    depends_on:
+      - db
+    ports:
+      - "8090:8080"
+    volumes:
+      - ./config.local.external.yaml:/app/config.yaml
+    env_file:
+      - .env
+    environment:
+      APP__DATABASE: "mysql://root:${DB_ROOT_PASSWORD}@db:3306/zap_stream?max_connections=2"
+      APP__LISTEN_HTTP: "0.0.0.0:8080"
+      RUST_LOG: info
+    restart: unless-stopped
+
+volumes:
+  db_data:
