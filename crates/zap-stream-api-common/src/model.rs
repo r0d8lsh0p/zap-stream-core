@@ -147,8 +147,10 @@ pub struct GameInfo {
     pub id: u64,
     pub name: String,
     pub summary: Option<String>,
+    #[serde(default)]
     pub genres: Vec<GameGenre>,
-    pub cover: GameCover,
+    #[serde(default)]
+    pub cover: Option<GameCover>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]

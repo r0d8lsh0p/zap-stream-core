@@ -122,6 +122,25 @@ impl GameDb {
             .header("accept", "application/json"))
     }
 
+    /// Send an IGDB query, checking the status code and reporting the response
+    /// body on decode failure (IGDB returns errors as JSON objects, not arrays).
+    async fn query_games(&self, url: &str, query: String) -> Result<Vec<GameInfo>> {
+        let rsp = self.post_base(url).await?.body(query).send().await?;
+        let status = rsp.status();
+        let body = rsp.text().await?;
+        if !status.is_success() {
+            error!("IGDB request failed ({}): {}", status, body);
+            bail!("IGDB request failed with status {}", status);
+        }
+        match serde_json::from_str(&body) {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                error!("Failed to decode IGDB response: {} body={}", e, body);
+                bail!("Failed to decode IGDB response: {}", e);
+            }
+        }
+    }
+
     /// Search for games and return the raw JSON string response.
     /// Results are cached for up to one hour to avoid excessive IGDB calls.
     pub async fn search_games(&self, search: &str, limit: u16) -> Result<Vec<GameInfo>> {
@@ -139,10 +158,9 @@ impl GameDb {
             limit
         );
 
-        let rsp = self.post_base(url).await?.body(q).send().await?;
-        let res: Vec<GameInfo> = rsp.json().await.map_err(anyhow::Error::from)?;
+        let res = self.query_games(url, q).await?;
         // Cache the fresh response before returning.
-        if res.len() > 0 {
+        if !res.is_empty() {
             self.set_cached(cache_key, res.clone()).await;
         }
         Ok(res)
@@ -157,11 +175,13 @@ impl GameDb {
         }
         let url = "https://api.igdb.com/v4/games";
         let q = format!("fields {}; where id = {};", Self::GAME_FIELDS, game_id);
-        let rsp = self.post_base(url).await?.body(q).send().await?;
-        let res: Vec<GameInfo> = rsp.json().await.map_err(anyhow::Error::from)?;
-        if res.len() > 0 {
+        let res = self.query_games(url, q).await?;
+        if !res.is_empty() {
             self.set_cached(cache_key, res.clone()).await;
         }
-        Ok(res.into_iter().next().unwrap())
+        match res.into_iter().next() {
+            Some(g) => Ok(g),
+            None => bail!("Game {} not found", game_id),
+        }
     }
 }
