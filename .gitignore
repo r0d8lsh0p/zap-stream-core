@@ -3,3 +3,13 @@
 **/out/
 scripts/.env
 scripts/node_modules/
+**/.env
+.DS_Store
+
+# Local development files
+docs/deploy/data/
+
+# Claude Code
+.claude/worktrees/
+.claude/settings.local.json
+.claude/memory/
