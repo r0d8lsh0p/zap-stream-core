@@ -459,19 +459,38 @@ No output means the event has been deleted. Deletion is a request, not a guarant
 
 - Staging is deployed and healthy (check logs with procedure 1, using `--environment Staging`)
 - `node` and `nak` installed locally
-- A **persistent test nsec** — do NOT use a throwaway key, as you need it to clean up afterwards
+- A **persistent test nsec** — do NOT use a throwaway key, you need it to clean up afterwards.
+  **It lives at `~/.config/zap-stream/smoke-test.nsec`** (mode 600, outside any git repo, bech32 `nsec1...` form).
+- For **local** (not staging) testing you also need:
+  - **The `sw2-relay` Nostr relay** — it is NOT defined in this repo. It lives in `/Users/bchq/projects/sw2`
+    (repo `r0d8lsh0p/sw2`, branch `docker`). Start with `docker compose up -d` there; binds `3334:3334`,
+    matching `config.local.external.yaml`. Its `write_whitelist.json`/`read_whitelist.json` are emptied
+    (empty list = allow all); a populated write list rejects our events with
+    `blocked: received event kind 30311 not allowed`.
+  - **A fresh `cloudflared` tunnel** — Cloudflare DNS-resolves and connects to a webhook URL before
+    registering it, so `APP__PUBLIC_URL` must be publicly reachable. The value stored in
+    `docs/deploy/.env` goes stale constantly; regenerate and update it every session.
 
 ### Procedure
 
-**Step 1: Create a test keypair (one-time)**
+**Step 1: The test keypair (already created)**
 
-Save a dedicated test nsec somewhere accessible. Generate one with:
+The persistent test key lives at `~/.config/zap-stream/smoke-test.nsec`. Use it:
 
 ```bash
-nak key generate
+export SMOKE_NSEC=$(tr -d '\n' < ~/.config/zap-stream/smoke-test.nsec)
 ```
 
-Store the nsec — you will reuse it for all smoke tests.
+If it is ever lost, regenerate and store it in bech32 form (`nak key generate` emits **hex**, which
+`nostr-tools` `nip19.decode` rejects — convert with `nak encode nsec <hex>`):
+
+```bash
+mkdir -p ~/.config/zap-stream && chmod 700 ~/.config/zap-stream
+nak encode nsec "$(nak key generate)" > ~/.config/zap-stream/smoke-test.nsec
+chmod 600 ~/.config/zap-stream/smoke-test.nsec
+```
+
+Losing it means losing the ability to delete streams it created via the API (procedure 6's primary path).
 
 **Step 2: Get stream credentials via NIP-98 auth**
 
@@ -513,9 +532,19 @@ SMOKE_NSEC=<your-test-nsec> node smoke.mjs
 ffmpeg -re -f lavfi -i "testsrc=size=1280x720:rate=30" \
   -f lavfi -i "sine=frequency=1000:sample_rate=44100" \
   -c:v libx264 -preset veryfast -tune zerolatency \
+  -g 60 -keyint_min 60 -sc_threshold 0 \
   -c:a aac -ar 44100 \
   -f flv "rtmps://live.cloudflare.com:443/live/<stream-key>" \
   -t 30
+```
+
+**The `-g 60 -keyint_min 60 -sc_threshold 0` flags are required.** Without an explicit keyframe
+interval Cloudflare rejects the stream with `ERR_GOP_OUT_OF_RANGE` ("Input GOP size or keyframe
+interval is out of range") and emits a `live_input.errored` webhook — which the service currently
+logs as `Unknown Cloudflare event type: live_input.errored` and otherwise ignores.
+
+```bash
+# (verify the stream appeared)
 ```
 
 **Step 4: Verify in staging logs**

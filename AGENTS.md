@@ -34,67 +34,94 @@ Key source files in `zap-stream-external`:
 ## Branch strategy
 
 ```
-dev/external               <-- daily work, local testing
-                               Railway staging auto-deploys from this branch
-  |
-  ├── PR + merge ────────► railway/external       <-- production deployment
-  |                            Pushes to origin auto-deploy production
-  |
-  └── cherry-pick code ──► integration/external   <-- upstream PRs to v0l/zap-stream-core
-                               NO Railway config, NO agent files, NO local dev tooling
+upstream/main ──(ff mirror)──► main        <-- pure mirror of v0l/zap-stream-core. NEVER commit here.
+                                │
+                                ├── feat/x ─────────────► PR to v0l/zap-stream-core (upstream)
+                                │
+                                └── dev/external         <-- main + thin deploy patch stack
+                                         │                   Railway STAGING auto-deploys on push
+                                         │
+                                         └──► railway/external   <-- Railway PRODUCTION auto-deploys
+                                                (a pointer — never developed on)
 ```
+
+### How to ship a change — the only two steps
+
+```bash
+# 1. get it onto staging
+git switch -c feat/x main       # start from main (the upstream mirror)
+# ...write code, commit...
+git switch dev/external
+git cherry-pick feat/x          # or: git merge feat/x
+git push origin dev/external    # staging deploys — smoke test it
+
+# 2. once staging looks good, promote the SAME commit to production
+git push origin dev/external:railway/external   # production deploys
+```
+
+Step 2 is a **fast-forward** — no `--force` needed (since 2026-09-30 `railway/external` is an ancestor of `dev/external`).
+
+**THE RULE: never commit directly to `railway/external`.** It only ever receives a commit that staging has already run. That is what guarantees production is byte-identical to what was validated.
 
 ### Branch rules
 
-- **`dev/external`** — the daily working branch. Feature branches are created from here. Railway staging is connected to this branch; pushing deploys staging automatically.
-- **`railway/external`** — production deployment branch. Receives PRs from `dev/external`. **Pushing to origin auto-deploys production.** Never push without explicit user approval.
-- **`integration/external`** — upstream-submittable code only. No Railway config, no agent docs, no local dev tooling, no secrets. Every commit here should be suitable for a PR to `v0l/zap-stream-core`. Receives cherry-picked code-only commits from `dev/external`.
+- **`main`** — a pure fast-forward **mirror of `upstream/main`**. Never commit here. Sync with `git fetch upstream && git branch -f main upstream/main`. Because it is a true mirror, any feature branch off `main` is upstream-submittable **by construction**.
+- **`dev/external`** — `main` plus the deploy patch stack. Railway **staging** auto-deploys on push. Safe to test freely.
+- **`railway/external`** — the same commit as `dev/external`. Railway **production** auto-deploys on push. **Never push without explicit user approval** — the single most dangerous action in this repo.
 
-### Relationship between branches
+`integration/external` was **retired and deleted 2026-09-28**. It existed only because `main` used to be divergent from upstream. Do not recreate it.
 
-`dev/external` and `railway/external` have **identical code**. The only difference is:
-- `dev/external` pushes deploy **staging** (safe, test freely)
-- `railway/external` pushes deploy **production** (dangerous, human approval required)
+### Upstream sync (periodic — the one exception)
 
-`integration/external` is a **strict subset** — it contains only code that is suitable for upstream. All Railway-specific files, local dev tooling, and agent docs are excluded.
+Rebasing the stack onto a new `main` rewrites history, so this round *does* need force-pushes:
+
+```bash
+git fetch upstream && git branch -f main upstream/main
+git rebase --onto main <old-main-sha> dev/external
+# force-push dev/external -> validate on staging -> force-push railway/external to match
+```
 
 ### Allowed divergences on `dev/external` and `railway/external`
 
-These branches contain every commit from `integration/external`, plus ONLY these categories of additions:
+`dev/external` = `main` + ONLY these categories. **Verify with `git diff main..dev/external --name-only`** — the only `.rs` file that may appear is `crates/zap-stream-external/src/main.rs`.
 
 | Category | Files |
 |----------|-------|
 | Railway deployment config | `railway.toml`, `docs/deploy/config.railway.external.yaml`, `docs/RAILWAY.md` |
 | Dockerfile config path | `crates/zap-stream-external/Dockerfile` — COPY line changed to use `config.railway.external.yaml` |
 | Structured JSON logging | `crates/zap-stream-external/src/main.rs` (`LOG_FORMAT=json` support), `Cargo.toml` (`json` feature on tracing-subscriber) |
-| Production data migration | `crates/zap-stream-db/migrations/20260224000000_migrate_cf_uid_to_external_id.sql` — one-time migration already applied to prod DB. **Cannot be deleted** because SQLx will crash on startup if a previously-applied migration file is missing. |
-| Local dev config | `docs/deploy/config.local.external.yaml` — local dev config with test relay, secrets commented out |
-| Local dev docker compose | `docs/deploy/docker-compose.override.yml` — self-contained compose for local dev testing |
-| Local dev automation | `docs/deploy/dev.sh` — script to automate tunnel + docker + test workflow (planned) |
+| Production data migration | `crates/zap-stream-db/migrations/20260224000000_migrate_cf_uid_to_external_id.sql` — already applied to the prod DB. **Cannot be deleted**: SQLx aborts at startup if a previously-applied migration file is missing. |
+| Local dev config | `docs/deploy/config.local.external.yaml` |
+| Local dev docker compose | `docs/deploy/docker-compose.override.yml` |
 | Gitignore additions | `.gitignore` — entries for `.env`, local dev data |
-| Agent documentation | `AGENTS.md`, `notes/` |
+| Agent documentation | `AGENTS.md`, `CLAUDE.md`, `notes/`, `.claude/skills/` |
 
-**If a divergence doesn't fit one of the categories above, it probably belongs on `integration/external` instead.** Ask before adding new divergences.
+**If a change does not fit a category above, it belongs upstream** — branch from `main` and PR to `v0l/zap-stream-core`. Ask before adding a new divergence category.
 
 ### CRITICAL: Production safety
 
-**Pushing to `railway/external` on origin auto-deploys production.** Never push to this branch without explicit user approval. This is the single most dangerous action you can take in this repo.
+**Pushing to `railway/external` on origin auto-deploys production.** Never push without explicit user approval.
+
+## Operational warnings (not obvious from the code)
+
+- **Metering is armed but dormant.** `bill_stream` charges per minute and **ends the stream at zero balance**, gated only on `endpoint.cost > 0`. All production ingest endpoints are currently `cost = 0`, so nothing is charged. Setting any endpoint's cost above zero starts metering and cut-offs **with no deploy** — it is a database lever, not a code change.
+- **Upstream's GitHub Actions are disabled at the repo level, and that state is NOT in git.** `docker-build.yml` and `docker-pr.yml` publish to *upstream's* Docker Hub (`voidic`) using a `DOCKER_TOKEN` this fork does not have; `docker-build.yml` failed on every push to `main`. Both are `state=disabled_manually` via `gh workflow disable`. Re-enable with `gh workflow enable <id>`. The state is keyed by file path, so **if upstream renames or adds a workflow it arrives active and may start failing — check Actions after each `main` sync.**
+- **There is no CI that builds or tests `zap-stream-external`.** Upstream's workflows only build `crates/zap-stream/Dockerfile` and `crates/n94-bridge/Dockerfile`, neither of which we deploy. Railway's "Wait for CI" therefore has nothing to gate on. Adding fork CI is feasible and cheap: the crate has **zero ffmpeg deps** and **zero `sqlx::query!` macros**, needs only `protobuf-compiler`, and all E2E tests are `#[ignore]`d so `cargo test -p zap-stream-external` runs just the unit tests.
+- **Production's Cloudflare token lacks Account Alerting permission.** Startup logs `Failed to setup notification policy: 403 Authentication error` on every boot. Pre-existing and harmless while the webhook destination already exists — but production cannot self-heal its notification policy if it ever needs re-creating.
+- **Deleting a stream publishes a NIP-09 request, which relays may ignore.** Observed 2026-09-28: only 2 of 4 public relays honoured it. The kind 30311 is replaced with `status=ended` regardless, so it stops advertising as live.
 
 ## Git ops workflow
 
-1. **Agent works on `dev/external`** (or a feature branch from it)
+1. Work on a feature branch **off `main`** (not off a deploy branch)
 2. **Run cargo tests** — `cargo test -p zap-stream-external` and `cargo test -p zap-stream-db`
 3. **Run local Docker E2E tests** — see "Local dev test environment" below
-4. **Push `dev/external`** — auto-deploys staging, manual smoke test to verify
-5. **PR from `dev/external` to `railway/external`** — deploys production (user approval required)
-6. **Cherry-pick** code-only commits to `integration/external` for upstream PRs
+4. **Cherry-pick onto `dev/external` and push** — auto-deploys staging; smoke test it (procedure 7)
+5. **Promote to `railway/external`** — `git push origin dev/external:railway/external` (user approval required)
+6. **PR the feature branch to `v0l/zap-stream-core`** for upstreaming
 
-### Local worktrees
+### Local layout
 
-| Directory | Branch | Purpose |
-|-----------|--------|---------|
-| `zap-stream-core-fork/` | `dev/external` | Daily workspace, local dev testing |
-| `zap-stream-external/` | `integration/external` | Upstream PR clean room (legacy, may be removed) |
+A **single checkout**, no worktrees: `zap-stream-core-fork/`. Switch it between `main`, `dev/external` and `railway/external` as needed. It holds the canonical gitignored `docs/deploy/.env` — never delete or overwrite that file.
 
 ## Testing
 
@@ -146,7 +173,8 @@ See `crates/zap-stream-external/tests/TESTING_README.md` for the full E2E test p
 ## Git safety
 
 - **Never push `railway/external` without user approval** — auto-deploys production
-- **Never `git add .` on `integration/external`** — its `.gitignore` is minimal (upstream-compatible), local files may be exposed
+- **Never commit to `railway/external` or `main`** — `railway/external` only receives validated `dev/external` commits; `main` is a pure upstream mirror
+- **Never `git add .` on `main`** — `main` mirrors upstream and has upstream's minimal `.gitignore`, so local files (`.env`, dev data) are NOT ignored there and could be exposed. The full `.gitignore` is a deploy-branch divergence.
 - **Never `git add -f`** to bypass `.gitignore` without explicit user approval
 - **Verify branch before any push**: `git branch --show-current`
 - **Each branch has its own `.gitignore`** — files safe on one branch may be exposed on another
