@@ -114,10 +114,24 @@ git rebase --onto main <old-main-sha> dev/external
 
 1. Work on a feature branch **off `main`** (not off a deploy branch)
 2. **Run cargo tests** — `cargo test -p zap-stream-external` and `cargo test -p zap-stream-db`
-3. **Run local Docker E2E tests** — see "Local dev test environment" below
-4. **Cherry-pick onto `dev/external` and push** — auto-deploys staging; smoke test it (procedure 7)
-5. **Promote to `railway/external`** — `git push origin dev/external:railway/external` (user approval required)
-6. **PR the feature branch to `v0l/zap-stream-core`** for upstreaming
+3. **Run local Docker E2E tests** — entirely on this machine, nothing deployed. See "Local dev test environment" below
+4. **Cherry-pick onto `dev/external`** — a local commit only; deploys nothing until it is pushed
+5. **`git push origin dev/external`** — **THIS DEPLOYS STAGING.** Needs the user's say-so; "test it" does not mean this
+6. **Promote to `railway/external`** — `git push origin dev/external:railway/external` (user approval required)
+7. **PR the feature branch to `v0l/zap-stream-core`** for upstreaming
+
+### CRITICAL: "local" means local. It never means staging.
+
+A request to "test locally" is satisfied entirely by steps 2-4 on this machine. It is **never** satisfied by pushing.
+
+Staging deploys **only on `git push origin dev/external`** — Railway watches the *remote* branch. Committing or
+cherry-picking onto a local `dev/external` deploys nothing; `git status -sb` showing `[ahead 1]` means staging has
+**not** seen the change. Confirm with `git branch -r --contains <sha>`: empty output means it never left this machine.
+
+**Local Docker E2E has to run from a checked-out `dev/external`** — `docs/deploy/docker-compose.override.yml` and
+`docs/deploy/config.local.external.yaml` are deploy-branch-only files, so they do not exist on a feature branch. That
+is the *only* reason to cherry-pick before testing, and it does not imply a push. Cherry-pick, run the harness, and
+leave the branch unpushed until the user asks for staging.
 
 ### Local layout
 
@@ -137,6 +151,11 @@ cargo test
 ```
 
 ### Local dev test environment
+
+**This runs wholly on this machine and deploys nothing.** The stack is a local MariaDB plus a `zap-stream-external`
+built from the working tree, publishing Nostr events to a local relay only. Two things do reach the outside world, by
+design: Cloudflare Stream API calls (dev account), and the cloudflared tunnel that lets Cloudflare's webhooks back in.
+Neither is staging. Staging is only ever touched by `git push origin dev/external`.
 
 Local integration testing uses Docker Compose with a self-contained override file. The setup lives in `docs/deploy/`:
 
@@ -217,7 +236,7 @@ The Cloudflare Stream API docs are maintained by Cloudflare:
 - `crates/zap-stream-external/tests/TESTING_README.md` — E2E test harness and procedures
 
 ### Skills (`.claude/skills/`)
-- `github-project-management` — Issues and project board are in `r0d8lsh0p/shosho-monorepo`, not this repo
+- `github-issues` — Issues live in `r0d8lsh0p/shosho-monorepo`, not this repo. **There is no GitHub project board**
 - `vibe-kanban` — Task management workflow for agents
 - `railway-logs` — Read production logs from Railway
 - `skill-creator` — Create new skills for this repo
