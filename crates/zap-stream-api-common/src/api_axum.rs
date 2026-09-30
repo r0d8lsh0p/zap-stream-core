@@ -134,7 +134,17 @@ where
             )
             .route(
                 "/api/v1/stream/{id}",
-                delete(
+                get(
+                    async |auth: Nip98Auth,
+                           State(this): State<AxumApi<T>>,
+                           Path(id): Path<Uuid>| {
+                        match this.handler.get_stream_info(auth, id).await {
+                            Ok(r) => Ok(Json(r)),
+                            Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError::from(e)))),
+                        }
+                    },
+                )
+                .delete(
                     async |auth: Nip98Auth,
                            State(this): State<AxumApi<T>>,
                            Path(id): Path<Uuid>| {

@@ -214,7 +214,9 @@ PATCH /api/v1/event
     "string"
   ],
   "content_warning": "string",
-  "goal": "string"
+  "goal": "string",
+  "starts": "2024-01-01T00:00:00Z",
+  "ends": "2024-01-01T01:00:00Z"
 }
 ```
 
@@ -225,6 +227,62 @@ PATCH /api/v1/event
 ```
 
 **Description:** Updates stream event metadata such as title, description, image, tags, content warnings, and goals.
+When `id` is omitted the patch updates the account's default stream metadata instead of a specific stream.
+
+A `starts` in the future announces a custom-key show: the stream is set to `planned` and its `kind:30311` is published.
+This also works on a custom-key show that has **ended**, which is how a recurring show is announced again at the same
+address; the previous broadcast's `ends` is dropped unless a new one is supplied. A `starts` that is not in the future
+is ignored, so a client that echoes back every field it read does not announce anything. `starts` never applies to a
+live stream or to an account-key stream.
+
+An ended custom-key show accepts edits — this is how the next episode gets its title and details, since going live
+on that key reuses the same stream. The edit is saved but **not published**: the event at that address still
+describes the previous episode, and the next go-live publishes the new details. An ended account-key stream still
+rejects every edit; the account key's next stream is a fresh one built from the account defaults, so prepare it by
+editing those instead (`PATCH` without an `id`).
+
+`ends` alone reschedules the end of a planned show.
+
+An edit to a stream that is live, or that is planned and already announced, re-publishes its event immediately, so the
+change reaches relays without waiting for the next periodic publish. A custom key that was never announced stays
+unpublished.
+
+#### Get Stream Event
+
+```
+GET /api/v1/stream/{id}
+```
+
+**Authentication:** Required
+
+**Path Parameters:**
+
+- `id`: Stream ID (UUID)
+
+**Response:**
+
+```json
+{
+  "id": "string",
+  "state": "planned",
+  "starts": 0,
+  "ends": 0,
+  "title": "string",
+  "summary": "string",
+  "image": "string",
+  "thumb": "string",
+  "tags": [
+    "string"
+  ],
+  "content_warning": "string",
+  "goal": "string",
+  "event": "string"
+}
+```
+
+**Description:** Reads back one of the caller's own stream events. `state` is one of `unknown`, `planned`, `live` or
+`ended`. `starts` and `ends` are unix timestamps in seconds. `event` is the published `kind:30311` event JSON, or absent
+if nothing has been published yet. Admins may read any user's stream.
 
 ### RTMP Forward Management
 
@@ -371,7 +429,23 @@ GET /api/v1/keys
     "key": "string",
     "created": 0,
     "expires": 0,
-    "stream_id": "string"
+    "stream_id": "string",
+    "stream": {
+      "id": "string",
+      "state": "planned",
+      "starts": 0,
+      "ends": 0,
+      "title": "string",
+      "summary": "string",
+      "image": "string",
+      "thumb": "string",
+      "tags": [
+        "string"
+      ],
+      "content_warning": "string",
+      "goal": "string",
+      "event": "string"
+    }
   }
 ]
 ```
@@ -379,6 +453,9 @@ GET /api/v1/keys
 **Description:** Returns all additional stream keys for the account. These are separate from the primary stream key (
 returned in account info) and are used for fixed stream events, planned streams, or 24/7 streams with pre-defined Nostr
 events.
+
+`stream` carries the details of the show the key is bound to, so an upcoming-shows list can be rendered from this one
+request. It is absent only if the bound stream row is missing. Same shape as `GET /api/v1/stream/{id}`.
 
 #### Create Additional Stream Key
 
@@ -402,7 +479,9 @@ POST /api/v1/keys
     "content_warning": "string",
     "goal": "string"
   },
-  "expires": "2024-01-01T00:00:00Z"
+  "expires": "2024-01-01T00:00:00Z",
+  "starts": "2024-01-01T00:00:00Z",
+  "ends": "2024-01-01T01:00:00Z"
 }
 ```
 
@@ -418,6 +497,22 @@ POST /api/v1/keys
 **Description:** Creates an additional stream key with pre-defined event metadata and optional expiration time. Unlike
 the primary stream key (which creates a new Nostr event each time), these keys are tied to a specific Nostr event and
 are ideal for planned streams, scheduled events, or 24/7 streaming scenarios.
+
+##### Announcing a planned show
+
+Set `starts` to a future time to announce a show in advance: a `kind:30311` event is published immediately and
+returned in `event`. Without a future `starts` nothing is published and `event` is absent — the key still works, and
+going live on it publishes as usual. The published event carries `status=planned`, the `starts`
+timestamp, and no `streaming` tag. When the user later streams to the returned key, the **same** event is updated in
+place — same `d` tag, so the same `naddr` — to `status=live` with a `streaming` tag, and `starts` becomes the time it
+actually went live, as NIP-53 requires. Each later episode on the same key does the same, so every episode advertises
+its own start. Ending the stream updates the same address to `status=ended`.
+
+A `starts` that is absent or not in the future means "now", which is the previous behaviour. Constraints: `ends` must
+be after `starts`, and `expires` must be after `starts` — a key that expires before its show airs could never be used.
+
+To change an announced show's title or schedule, or to announce a key later, `PATCH /api/v1/event` with the `id` from
+`GET /api/v1/keys`.
 
 #### Delete Stream
 
@@ -437,7 +532,13 @@ DELETE /api/v1/stream/{id}
 {}
 ```
 
-**Description:** Deletes a stream. Users can only delete their own streams. Also publishes a Nostr deletion event if the
+**Description:** Cancels a stream. Users can only delete their own streams, admins may delete any.
+
+Cancellation is **soft**: a NIP-09 deletion request is published for the stream's `kind:30311`, and nothing else is
+torn down. The stream row and any additional stream key bound to it are left as they are, so streaming to that key
+afterwards still works. Whether the event actually disappears is up to each relay — some ignore deletion requests.
+
+Also publishes a Nostr deletion event if the
 stream has an associated Nostr event.
 
 ### Lightning Address (LNURL)

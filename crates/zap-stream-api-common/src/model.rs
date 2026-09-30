@@ -100,12 +100,40 @@ pub struct StreamKey {
     pub created: i64,
     pub expires: Option<i64>,
     pub stream_id: String,
+    /// The stream (show) this key is bound to, so clients can render the
+    /// event details they created the key with without a second request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<StreamInfo>,
+}
+
+/// Read-back of a user's own stream event.
+#[derive(Deserialize, Serialize, Clone)]
+pub struct StreamInfo {
+    pub id: String,
+    /// One of `unknown`, `planned`, `live`, `ended`
+    pub state: String,
+    pub starts: i64,
+    pub ends: Option<i64>,
+    pub title: Option<String>,
+    pub summary: Option<String>,
+    pub image: Option<String>,
+    pub thumb: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub content_warning: Option<String>,
+    pub goal: Option<String>,
+    /// The published kind:30311 event JSON, if one has been published
+    pub event: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
 pub struct CreateStreamKeyRequest {
     pub event: PatchEventDetails,
     pub expires: Option<DateTime<Utc>>,
+    /// When the show starts. Defaults to now, set it in the future to
+    /// announce a planned show.
+    pub starts: Option<DateTime<Utc>>,
+    /// When the show is expected to end.
+    pub ends: Option<DateTime<Utc>>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -123,9 +151,12 @@ pub struct PatchEvent {
     pub tags: Option<Vec<String>>,
     pub content_warning: Option<String>,
     pub goal: Option<String>,
+    /// Reschedule a planned show. Ignored when patching user defaults.
+    pub starts: Option<DateTime<Utc>>,
+    pub ends: Option<DateTime<Utc>>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 pub struct PatchEventDetails {
     pub title: Option<String>,
     pub summary: Option<String>,

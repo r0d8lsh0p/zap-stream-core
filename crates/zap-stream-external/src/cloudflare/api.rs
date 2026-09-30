@@ -132,6 +132,8 @@ fn build_stream_key(row: &zap_stream_db::UserStreamKey, key: String) -> StreamKe
         created: row.created.timestamp(),
         expires: row.expires.map(|e| e.timestamp()),
         stream_id: row.stream_id.clone(),
+        // filled in by ApiBase::attach_stream_info
+        stream: None,
     }
 }
 
@@ -453,9 +455,8 @@ impl CfApiWrapper {
                 "Resuming fixed stream {} for custom key {} (user {})",
                 stream.id, key_id, user.id
             );
-            stream.state = UserStreamState::Live;
+            stream.begin_live_session(Utc::now());
             stream.endpoint_id = Some(endpoint.id);
-            stream.ends = None;
             stream.external_input_id = Some(input.uid.clone());
             self.db.update_stream(&stream).await?;
             self.register_input_mapping(&input.uid, &stream.id).await;
@@ -1087,15 +1088,25 @@ impl CfApiWrapper {
             Tag::parse(["p", hex::encode(&user.pubkey).as_str(), "", "host"])?,
             Tag::parse(["service", self.map_to_public_url("api/v1")?.as_str()])?,
         ];
-        let input = self.get_user_live_input(user).await?;
-        match (&stream.state, self.get_streaming_url(&stream, &input)?) {
-            (&UserStreamState::Live, Some(u)) => {
-                extra_tags.push(Tag::parse(["streaming", u.as_str()])?)
+        // Resolving a Live Input creates one as a side effect, so only look it up
+        // when the event actually needs a playback URL. A planned show has none,
+        // and so does a cancelled one that never recorded anything.
+        let needs_playback_url = match stream.state {
+            UserStreamState::Live => true,
+            UserStreamState::Ended => stream.external_video_id.is_some(),
+            _ => false,
+        };
+        if needs_playback_url {
+            let input = self.get_user_live_input(user).await?;
+            match (&stream.state, self.get_streaming_url(stream, &input)?) {
+                (&UserStreamState::Live, Some(u)) => {
+                    extra_tags.push(Tag::parse(["streaming", u.as_str()])?)
+                }
+                (&UserStreamState::Ended, Some(u)) => {
+                    extra_tags.push(Tag::parse(["recording", u.as_str()])?)
+                }
+                _ => {}
             }
-            (&UserStreamState::Ended, Some(u)) => {
-                extra_tags.push(Tag::parse(["recording", u.as_str()])?)
-            }
-            _ => {}
         }
         if let Some(url) = download_url {
             extra_tags.push(Tag::parse(["download", url])?);
@@ -1160,13 +1171,11 @@ impl CfApiWrapper {
         Ok(balance <= 0)
     }
 
-    /// Re-publish the Nostr event for a live stream after its metadata changed.
-    /// No-op for streams that are not currently live.
+    /// Publish a stream's Nostr event and store it — the counterpart of the core
+    /// backend's `Overseer::on_update`. Whether to publish is decided by `ApiBase`,
+    /// so the two backends cannot drift.
     async fn republish_stream_event(&self, stream_id: &Uuid) -> Result<()> {
         let mut stream = self.db.get_stream(stream_id).await?;
-        if stream.state != UserStreamState::Live {
-            return Ok(());
-        }
         let user = self.db.get_user(stream.user_id).await?;
         let event = self.publish_stream_event(&stream, &user).await?;
         stream.event = Some(event.as_json());
@@ -1345,13 +1354,10 @@ impl ZapStreamApi for CfApiWrapper {
     }
 
     async fn update_event(&self, auth: Nip98Auth, patch: PatchEvent) -> Result<()> {
-        self.api_base.update_event(auth, patch.clone()).await?;
-
-        // Republish the kind 30311 event immediately so metadata edits appear on
-        // Nostr right away. Without this the change only lands on the next poller
-        // publish (viewer-count driven), which can take several minutes or never.
-        if let Some(id) = patch.id
-            && let Ok(uuid) = id.parse::<Uuid>()
+        // Republish immediately so edits appear on Nostr right away rather than on
+        // the next viewer-count-driven poller publish, which can be minutes or never.
+        if let Some(stream) = self.api_base.update_event(auth, patch).await?
+            && let Ok(uuid) = stream.id.parse::<Uuid>()
             && let Err(e) = self.republish_stream_event(&uuid).await
         {
             warn!("Failed to republish nostr event for stream {}: {}", uuid, e);
@@ -1361,6 +1367,10 @@ impl ZapStreamApi for CfApiWrapper {
 
     async fn delete_event(&self, auth: Nip98Auth, stream_id: Uuid) -> Result<()> {
         self.api_base.delete_event(auth, stream_id).await
+    }
+
+    async fn get_stream_info(&self, auth: Nip98Auth, stream_id: Uuid) -> Result<StreamInfo> {
+        self.api_base.get_stream_info(auth, stream_id).await
     }
 
     async fn create_forward(
@@ -1480,6 +1490,7 @@ impl ZapStreamApi for CfApiWrapper {
                 }
             }
         }
+        self.api_base.attach_stream_info(uid, &mut out).await?;
         Ok(out)
     }
 
@@ -1489,9 +1500,8 @@ impl ZapStreamApi for CfApiWrapper {
         req: CreateStreamKeyRequest,
     ) -> Result<CreateStreamKeyResponse> {
         let uid = self.db.upsert_user(&auth.pubkey).await?;
-        let stream_id = Uuid::new_v4();
         let pk = PublicKey::from_slice(&auth.pubkey)?;
-        let live_input_name = format!("{}-{}", pk.to_bech32()?, stream_id);
+        let live_input_name = format!("{}-{}", pk.to_bech32()?, Uuid::new_v4());
         let response = self.client.create_live_input(&live_input_name).await?;
         let input = response.result;
         // If DB writes below fail, this CF Live Input becomes a "ghost" — it exists
@@ -1499,39 +1509,29 @@ impl ZapStreamApi for CfApiWrapper {
         // harmless (no quota cost, no billing), and deleting CF inputs risks breaking
         // active stream key references that cannot be recovered.
 
-        let mut new_stream = zap_stream_db::UserStream {
-            id: stream_id.to_string(),
-            user_id: uid,
-            starts: Utc::now(),
-            state: zap_stream_db::UserStreamState::Planned,
-            title: req.event.title,
-            summary: req.event.summary,
-            image: req.event.image,
-            tags: req.event.tags.map(|t| t.join(",")),
-            content_warning: req.event.content_warning,
-            goal: req.event.goal,
-            ..Default::default()
-        };
-
-        self.db.insert_stream(&new_stream).await?;
-
-        let key_id = self
-            .db
-            .create_stream_key(
-                uid,
-                &input.rtmps.stream_key,
-                Some(&input.uid),
-                req.expires,
-                &stream_id.to_string(),
-            )
+        let (stream, announce) = self
+            .api_base
+            .create_keyed_stream(uid, &input.rtmps.stream_key, Some(&input.uid), &req)
             .await?;
 
-        new_stream.stream_key_id = Some(key_id);
-        self.db.update_stream(&new_stream).await?;
+        // A future `starts` announces the show as `status=planned`, at the same
+        // address it will later go live on. Without one, nothing is published.
+        let event = if announce {
+            let stream_uuid = Uuid::parse_str(&stream.id)?;
+            match self.republish_stream_event(&stream_uuid).await {
+                Ok(()) => self.db.get_stream(&stream_uuid).await?.event,
+                Err(e) => {
+                    warn!("Failed to publish event for stream {}: {}", stream.id, e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         Ok(CreateStreamKeyResponse {
             key: input.rtmps.stream_key,
-            event: None,
+            event,
         })
     }
 
@@ -2077,6 +2077,45 @@ mod tests {
         assert!(first > 0);
         assert_eq!(first, second);
         mock.assert_async().await;
+    }
+
+    #[test]
+    fn going_live_bills_only_this_session_whatever_starts_said() {
+        // An hour of the real 30s poller after a custom key goes live. Before going live
+        // the row can carry a schedule or a previous episode, and none of it may leak into
+        // the bill: a stale `starts` over-billed 4x, an announced `starts` later than the
+        // actual start made the gap free, and a re-planned `starts` with the previous
+        // episode's `duration` made the whole episode free.
+        let go_live = Utc::now();
+        let week = chrono::Duration::days(7);
+        for (label, starts, prior_duration) in [
+            ("stale starts", go_live - week, 3600.0),
+            (
+                "announced later than going live",
+                go_live + chrono::Duration::minutes(30),
+                0.0,
+            ),
+            ("re-planned, previous episode billed", go_live, 3600.0),
+        ] {
+            let mut stream = sample_stream();
+            stream.state = UserStreamState::Ended;
+            stream.starts = starts;
+            stream.duration = prior_duration;
+
+            stream.begin_live_session(go_live);
+
+            let mut billed = 0.0;
+            for tick in 1..=120 {
+                let now = go_live + chrono::Duration::seconds(30 * tick);
+                let b = billable_duration(&stream, now, super::MAX_BILLABLE_CATCHUP_SECS);
+                stream.duration += b; // what tick_stream does
+                billed += b;
+            }
+            assert!(
+                (billed - 3600.0f32).abs() < 1.0,
+                "{label}: streamed 3600s, billed {billed}s"
+            );
+        }
     }
 
     #[test]

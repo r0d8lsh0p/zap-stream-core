@@ -10,7 +10,7 @@ use zap_stream::api_base::ApiBase;
 use zap_stream_api_common::{
     AccountInfo, AccountTos, CreateStreamKeyRequest, CreateStreamKeyResponse, Endpoint,
     EndpointCost, ForwardDest, ForwardRequest, ForwardResponse, GameDb, GameInfo, HistoryResponse,
-    Nip98Auth, PatchAccount, PatchEvent, PatchEventDetails, StreamKey, TopupResponse,
+    Nip98Auth, PatchAccount, PatchEvent, PatchEventDetails, StreamInfo, StreamKey, TopupResponse,
     UpdateForwardRequest, ZapStreamApi,
 };
 use zap_stream_core::listen::ListenerEndpoint;
@@ -209,19 +209,21 @@ impl ZapStreamApi for Api {
     }
 
     async fn update_event(&self, auth: Nip98Auth, patch: PatchEvent) -> Result<()> {
-        self.api_base.update_event(auth, patch.clone()).await?;
-        if let Some(id) = patch.id
-            && let Ok(uuid) = id.parse()
+        if let Some(stream) = self.api_base.update_event(auth, patch).await?
+            && let Ok(uuid) = stream.id.parse::<Uuid>()
+            && let Err(e) = self.overseer.on_update(&uuid).await
         {
-            if let Err(e) = self.overseer.on_update(&uuid).await {
-                warn!("Failed to republish nostr event for stream {}: {}", uuid, e);
-            }
+            warn!("Failed to republish nostr event for stream {}: {}", uuid, e);
         }
         Ok(())
     }
 
     async fn delete_event(&self, auth: Nip98Auth, stream_id: Uuid) -> Result<()> {
         self.api_base.delete_event(auth, stream_id).await
+    }
+
+    async fn get_stream_info(&self, auth: Nip98Auth, stream_id: Uuid) -> Result<StreamInfo> {
+        self.api_base.get_stream_info(auth, stream_id).await
     }
 
     async fn create_forward(
@@ -276,7 +278,32 @@ impl ZapStreamApi for Api {
         auth: Nip98Auth,
         req: CreateStreamKeyRequest,
     ) -> Result<CreateStreamKeyResponse> {
-        self.api_base.create_stream_key(auth, req).await
+        let uid = self.db.upsert_user(&auth.pubkey).await?;
+        let new_key = Uuid::new_v4().to_string();
+        let (stream, announce) = self
+            .api_base
+            .create_keyed_stream(uid, &new_key, None, &req)
+            .await?;
+
+        // A future `starts` announces the show as `status=planned`, at the same
+        // address it will later go live on. Without one, nothing is published.
+        let event = if announce {
+            let stream_uuid = Uuid::parse_str(&stream.id)?;
+            match self.overseer.on_update(&stream_uuid).await {
+                Ok(()) => self.db.get_stream(&stream_uuid).await?.event,
+                Err(e) => {
+                    warn!("Failed to publish event for stream {}: {}", stream.id, e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        Ok(CreateStreamKeyResponse {
+            key: new_key,
+            event,
+        })
     }
 
     async fn delete_stream_key(&self, _auth: Nip98Auth, _key_id: u64) -> Result<()> {

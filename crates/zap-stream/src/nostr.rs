@@ -301,6 +301,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_to_event_planned_announces_schedule_without_streaming_url() {
+        let keys = Keys::generate();
+        let client = ClientBuilder::new().signer(keys).build();
+        let publisher = N53Publisher::new(StreamManager::new("test-node".to_string()), client);
+
+        let starts = Utc::now() + chrono::Duration::hours(6);
+        let ends = starts + chrono::Duration::hours(1);
+        let mut stream = sample_stream(UserStreamState::Planned);
+        stream.starts = starts;
+        stream.ends = Some(ends);
+        stream.title = Some("Future Show".to_string());
+
+        let event = publisher
+            .stream_to_event(&stream, vec![], None)
+            .await
+            .unwrap();
+
+        let value = |name: &str| {
+            event
+                .tags
+                .iter()
+                .find(|t| t.as_slice().first().map(|v| v.as_str()) == Some(name))
+                .and_then(|t| t.as_slice().get(1).map(|v| v.to_string()))
+        };
+        assert_eq!(value("status").as_deref(), Some("planned"));
+        assert_eq!(value("starts"), Some(starts.timestamp().to_string()));
+        assert_eq!(value("ends"), Some(ends.timestamp().to_string()));
+        assert_eq!(value("d").as_deref(), Some(TEST_STREAM_UUID));
+        assert_eq!(value("title").as_deref(), Some("Future Show"));
+        // A show that has not started has nobody watching. (`streaming` is not
+        // asserted here: it only ever arrives via `extra_tags`, so a unit test that
+        // passes none of them proves nothing. The backends gate it on state, and
+        // e2e_planned_show covers that.)
+        assert_eq!(count_tag(event.tags.iter(), "current_participants"), 0);
+    }
+
+    #[tokio::test]
+    async fn stream_to_event_keeps_d_tag_across_the_lifecycle() {
+        let keys = Keys::generate();
+        let client = ClientBuilder::new().signer(keys).build();
+        let publisher = N53Publisher::new(StreamManager::new("test-node".to_string()), client);
+
+        // The d tag is the show's address: it must not move as the status changes.
+        let mut seen = Vec::new();
+        for state in [
+            UserStreamState::Planned,
+            UserStreamState::Live,
+            UserStreamState::Ended,
+        ] {
+            let stream = sample_stream(state);
+            let event = publisher
+                .stream_to_event(&stream, vec![], None)
+                .await
+                .unwrap();
+            let d = event
+                .tags
+                .iter()
+                .find(|t| t.as_slice().first().map(|v| v.as_str()) == Some("d"))
+                .and_then(|t| t.as_slice().get(1).map(|v| v.to_string()))
+                .unwrap();
+            seen.push((d, event.pubkey));
+        }
+        assert_eq!(seen[0], seen[1]);
+        assert_eq!(seen[1], seen[2]);
+        assert_eq!(seen[0].0, TEST_STREAM_UUID);
+    }
+
+    #[tokio::test]
     async fn stream_to_event_no_alt_when_none() {
         let keys = Keys::generate();
         let client = ClientBuilder::new().signer(keys).build();

@@ -1,7 +1,7 @@
 use crate::{
     AccountInfo, CreateStreamKeyRequest, CreateStreamKeyResponse, ForwardRequest, ForwardResponse,
-    GameInfo, HistoryResponse, Nip98Auth, PatchAccount, PatchEvent, StreamKey, TopupResponse,
-    UpdateForwardRequest,
+    GameInfo, HistoryResponse, Nip98Auth, PatchAccount, PatchEvent, StreamInfo, StreamKey,
+    TopupResponse, UpdateForwardRequest,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -13,6 +13,8 @@ pub trait ZapStreamApi: Clone + Send + Sync {
     async fn update_account(&self, auth: Nip98Auth, patch_account: PatchAccount) -> Result<()>;
     async fn update_event(&self, auth: Nip98Auth, patch: PatchEvent) -> Result<()>;
     async fn delete_event(&self, auth: Nip98Auth, stream_id: Uuid) -> Result<()>;
+    /// Read back one of the caller's own stream events.
+    async fn get_stream_info(&self, auth: Nip98Auth, stream_id: Uuid) -> Result<StreamInfo>;
     async fn create_forward(&self, auth: Nip98Auth, req: ForwardRequest)
     -> Result<ForwardResponse>;
     async fn delete_forward(&self, auth: Nip98Auth, forward_id: u64) -> Result<()>;

@@ -114,6 +114,27 @@ pub struct UserStream {
     pub external_input_id: Option<String>,
 }
 
+impl UserStream {
+    /// Begin a new live session on a reused stream row — a custom key going live again.
+    ///
+    /// `starts` becomes the moment the show actually went live, as NIP-53 asks, rather
+    /// than whatever was announced or the previous session's time. `duration` restarts
+    /// with it: time-based billing measures `now - starts` against `duration`, so moving
+    /// one without the other would bill against the wrong baseline. `cost` is kept — it
+    /// is the only record of what has been charged.
+    ///
+    /// A stream already live is left alone, so a repeated go-live signal cannot restart
+    /// a session that is still running.
+    pub fn begin_live_session(&mut self, now: DateTime<Utc>) {
+        if self.state != UserStreamState::Live {
+            self.starts = now;
+            self.duration = 0.0;
+        }
+        self.state = UserStreamState::Live;
+        self.ends = None;
+    }
+}
+
 #[derive(Debug, Clone, FromRow)]
 pub struct UserStreamForward {
     pub id: u64,
@@ -278,4 +299,51 @@ pub struct BalanceOffset {
     pub total_payments: i64,
     pub total_stream_costs: i64,
     pub balance_offset: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{UserStream, UserStreamState};
+    use chrono::{Duration, Utc};
+
+    #[test]
+    fn going_live_starts_a_fresh_session() {
+        let now = Utc::now();
+        for state in [UserStreamState::Planned, UserStreamState::Ended] {
+            let mut stream = UserStream::default();
+            stream.state = state;
+            stream.starts = now - Duration::days(7);
+            stream.ends = Some(now - Duration::days(7) + Duration::hours(1));
+            stream.duration = 3600.0;
+            stream.cost = 1234;
+
+            stream.begin_live_session(now);
+
+            assert_eq!(stream.state, UserStreamState::Live);
+            assert_eq!(
+                stream.starts, now,
+                "starts must be when it actually went live"
+            );
+            assert_eq!(
+                stream.duration, 0.0,
+                "the billing baseline must restart with it"
+            );
+            assert_eq!(stream.ends, None);
+            assert_eq!(stream.cost, 1234, "money already charged must be kept");
+        }
+    }
+
+    #[test]
+    fn a_live_session_is_not_restarted() {
+        let now = Utc::now();
+        let mut stream = UserStream::default();
+        stream.state = UserStreamState::Live;
+        stream.starts = now - Duration::minutes(20);
+        stream.duration = 1200.0;
+
+        stream.begin_live_session(now);
+
+        assert_eq!(stream.starts, now - Duration::minutes(20));
+        assert_eq!(stream.duration, 1200.0);
+    }
 }
