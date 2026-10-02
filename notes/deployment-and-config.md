@@ -1,5 +1,11 @@
 # Deployment & Configuration Guide for zap-stream-external
 
+> **SUPERSEDED FOR STAGING (2026-10-02).** Staging now deploys any branch off `main`
+> unmodified, with everything Railway needs held outside git. **Read
+> `notes/deployment-model.md` first.** The content below still describes how
+> **PRODUCTION** works, and remains accurate until production is migrated.
+
+
 ## How the binary loads configuration
 
 The binary uses the Rust `config` crate (`crates/zap-stream-external/src/main.rs`, lines 77-83):
@@ -53,7 +59,7 @@ Source: `docs/deploy/config.railway.external.yaml` header comment explains this.
 **Cloudflare notification policy** (one-time per account): The `live_input.connected` and `live_input.disconnected` events require a separate notification policy configured via the Cloudflare Alerting API. This is NOT auto-created on startup (see r0d8lsh0p/shosho-monorepo#824). Follow `docs/CLOUDFLARE_BACKEND.md` step 4 for setup. The API token needs both **Stream** and **Notifications** permissions.
 
 **The Dockerfile differs between branches.** This is a direct edit, not a Docker override:
-- `integration/external`: `COPY crates/zap-stream-external/config.yaml /app/config.yaml` (upstream default)
+- `main` (and any branch off it): `COPY crates/zap-stream-external/config.yaml /app/config.yaml` (upstream default). Under the new model this baked file is REPLACED at boot by the start command writing `APP_CONFIG_YAML`.
 - `dev/external` / `railway/external`: `COPY docs/deploy/config.railway.external.yaml /app/config.yaml` (our production config)
 
 When cherry-picking commits that modify the Dockerfile, watch for conflicts on this line.
@@ -134,7 +140,7 @@ For local dev testing, use only `docker-compose.override.yml`. Do not merge it w
 
 ### 1. Do not rename tracked upstream files
 
-Files like `compose-config.yaml`, `docker-compose.yaml`, `docker-compose.external.yaml` exist on `integration/external` and upstream. Do not rename, delete, or restructure them.
+Files like `compose-config.yaml`, `docker-compose.yaml`, `docker-compose.external.yaml` exist on `main` and upstream. Do not rename, delete, or restructure them. (Note: `compose-config.yaml` on the old 2025 branches is where a production Cloudflare token was leaked — those branches were deleted 2026-09-30.)
 
 ### 2. Do not create config files that nothing references
 
@@ -156,9 +162,9 @@ The `config` crate's precedence means:
 
 Getting this wrong means the service silently uses the wrong credentials.
 
-### 5. Do not edit the Dockerfile on integration/external to reference railway-specific files
+### 5. Do not edit the Dockerfile on `main` to reference railway-specific files
 
-The Dockerfile on `integration/external` must reference only upstream-compatible paths. Railway-specific changes (like the config file path) belong on `dev/external` and `railway/external` only.
+The Dockerfile on `main` must reference only upstream-compatible paths. Under the new model NO Railway-specific Dockerfile change is needed at all — the config is written at boot instead. The old baked-config Dockerfile change survives only on `railway/external` until production is migrated.
 
 ### 6. NEVER delete a migration file that has been applied to production
 

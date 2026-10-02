@@ -33,35 +33,51 @@ Key source files in `zap-stream-external`:
 
 ## Branch strategy
 
+> **READ `notes/deployment-model.md` FIRST.** The deployment model changed on
+> 2026-10-02. Staging now deploys **any branch off `main`, unmodified** — nothing
+> Railway needs lives in git any more. Production has **not** been migrated yet and
+> still uses the older deploy-stack model described further down.
+
 ```
-upstream/main ──(ff mirror)──► main        <-- pure mirror of v0l/zap-stream-core. NEVER commit here.
-                                │
-                                ├── feat/x ─────────────► PR to v0l/zap-stream-core (upstream)
-                                │
-                                └── dev/external         <-- main + thin deploy patch stack
-                                         │                   Railway STAGING auto-deploys on push
-                                         │
-                                         └──► railway/external   <-- Railway PRODUCTION auto-deploys
-                                                (a pointer — never developed on)
+upstream/main ──(ff mirror)──► main     <-- pure mirror of v0l/zap-stream-core. NEVER commit here.
+                                 │
+                                 └── feat/x ──┬──► PR to v0l/zap-stream-core (upstream)
+                                              │
+                                              └──► point Railway STAGING at this branch
+                                                   (deploys unmodified — no deploy stack)
+
+dev/external ──► railway/external       <-- OLD model, PRODUCTION ONLY until migrated
 ```
 
-### How to ship a change — the only two steps
+### How to ship a change (new model — staging)
 
 ```bash
-# 1. get it onto staging
-git switch -c feat/x main       # start from main (the upstream mirror)
-# ...write code, commit...
-git switch dev/external
-git cherry-pick feat/x          # or: git merge feat/x
-git push origin dev/external    # staging deploys — smoke test it
-
-# 2. once staging looks good, promote the SAME commit to production
-git push origin dev/external:railway/external   # production deploys
+git switch -c feat/x main       # branch off main, the upstream mirror
+# ...write code, commit...      # code only; nothing Railway-specific
+git push -u origin feat/x       # then point Railway staging at feat/x in the dashboard
 ```
 
-Step 2 is a **fast-forward** — no `--force` needed (since 2026-09-30 `railway/external` is an ancestor of `dev/external`).
+That is the whole flow. No cherry-picks, no shared branch, each change tested alone.
+Raise the upstream PR from the same branch. Settings and config live in Railway — see
+`notes/deployment-model.md` for the exact start command and variables.
 
-**THE RULE: never commit directly to `railway/external`.** It only ever receives a commit that staging has already run. That is what guarantees production is byte-identical to what was validated.
+### Production (old model, until migrated)
+
+Production still deploys from `railway/external`, which carries the deploy stack
+(`railway.toml`, baked `config.railway.external.yaml`, the fork migration file). To ship
+to production today you still need the old two-step flow:
+
+```bash
+git switch dev/external && git cherry-pick feat/x
+git push origin dev/external                     # (no longer deploys staging)
+git push origin dev/external:railway/external    # production — user approval required
+```
+
+**THE RULE: never commit directly to `railway/external`.** It only ever receives a commit already validated elsewhere.
+
+`dev/external` no longer auto-deploys staging (staging points at feature branches), so it
+is now just the staging area for production promotions and the home of these docs. Keep
+feature code OFF it — that is what caused the Sept 2026 collision.
 
 ### Branch rules
 

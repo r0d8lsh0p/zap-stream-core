@@ -1,5 +1,11 @@
 # Railway Deployment Guide (zap-stream-external)
 
+> **SUPERSEDED FOR STAGING (2026-10-02).** Staging now deploys any branch off `main`
+> unmodified, with everything Railway needs held outside git. **Read
+> `notes/deployment-model.md` first.** The content below still describes how
+> **PRODUCTION** works, and remains accurate until production is migrated.
+
+
 ## Overview
 
 Deploying the `zap-stream-external` Cloudflare Live Stream backend as a service in the Shosho Railway project.

@@ -1,12 +1,21 @@
 # Railway deployment config for zap-stream-external
 #
-# CRITICAL: If a value exists in this file, the corresponding Railway
-# environment variable is COMPLETELY IGNORED. The Rust `config` crate loads
-# files first, then environment variables. Only commented-out keys can be
-# overridden by env vars.
+# NOTE (corrected 2026-10-02): an earlier version of this comment claimed that a
+# value present in this file makes the matching environment variable "COMPLETELY
+# IGNORED". That was WRONG. The `config` crate adds the Environment source AFTER the
+# file, and later sources win, so environment variables DO override file values.
+# Verified by unit test (see env_overrides_file_scalar).
 #
-# Never uncomment Railway-managed values or you'll be debugging for hours
-# why your environment variables aren't working.
+# Two real caveats:
+#  - `payments` is an externally-tagged pick-one enum. You cannot switch backend by
+#    adding APP__PAYMENTS__LNURL__ADDRESS on top of a file that sets payments.lnd --
+#    the two keys merge and deserialization fails. Replace the whole file instead.
+#  - `relays` is a list. Plain env vars cannot parse "a,b" into Vec<String>; it needs
+#    try_parsing + list_separator (see env_source()). Without that code, setting
+#    APP__RELAYS crash-loops the service.
+#
+# This file is superseded for staging -- see notes/deployment-model.md. It is still
+# baked into the PRODUCTION image until production is migrated.
 
 # Database connection string
 # Set via Railway env var: APP__DATABASE

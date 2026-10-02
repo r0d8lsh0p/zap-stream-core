@@ -2,6 +2,11 @@
 
 **READ THIS BEFORE ANY GIT OPERATIONS OR COMMITS**
 
+> **UPDATED 2026-10-02.** Two things in older copies of this file were wrong:
+> `integration/external` **was deleted on 2026-09-28** and must not be recreated, and
+> `dev/external` **no longer auto-deploys staging** (staging points at feature
+> branches). See `notes/deployment-model.md`.
+
 This document consolidates hard-won lessons from real incidents. Every rule exists because something went wrong.
 
 ---
@@ -15,7 +20,7 @@ dev/external               <-- daily work, local testing
   ├── PR + merge ────────► railway/external       <-- production deployment
   |                            PUSHES TO ORIGIN AUTO-DEPLOY PRODUCTION
   |
-  └── cherry-pick code ──► integration/external   <-- upstream PRs to v0l/zap-stream-core
+  (integration/external was DELETED 2026-09-28 — branch off main for upstream PRs)
                                NO Railway config, NO agent files, NO local dev tooling
 ```
 
@@ -23,9 +28,9 @@ dev/external               <-- daily work, local testing
 
 | Branch | Purpose | Push to origin? |
 |--------|---------|-----------------|
-| `dev/external` | Daily work + local testing | Yes — auto-deploys **staging** |
+| `dev/external` | Staging area for production promotions; home of these docs. Keep feature code OFF it. | No longer auto-deploys staging |
 | `railway/external` | Production deploy | **DANGEROUS** — auto-deploys **production**. User approval required |
-| `integration/external` | Upstream-submittable code | Yes — but only cherry-picked, code-only commits |
+| `feat/*` off `main` | Upstream-submittable code; point Railway staging here to test | Deploys unmodified |
 | Feature branches | WIP from `dev/external` | Yes — safe to push |
 | `upstream-main` | Local upstream tracking | **NEVER PUSH** — lacks our .gitignore |
 
@@ -39,7 +44,7 @@ dev/external               <-- daily work, local testing
 - Before ANY push to `railway/external`, confirm with user: "Is deployment intended right now?"
 - If unsure: **STOP. Do not push.**
 
-**Pushing to `dev/external` on origin = STAGING DEPLOYMENT.** This is safe for testing.
+**Pushing to `dev/external` no longer deploys anything** — staging points at feature branches. Production still deploys from `railway/external`.
 
 ---
 
@@ -47,13 +52,13 @@ dev/external               <-- daily work, local testing
 
 **Each branch has its OWN `.gitignore`.** Files ignored on one branch may be TRACKABLE on another.
 
-`dev/external` and `railway/external` have expanded `.gitignore` entries that protect local files. `integration/external` has a minimal `.gitignore` (upstream-compatible). Local dev files are NOT protected on `integration/external`.
+`dev/external` and `railway/external` have expanded `.gitignore` entries that protect local files. **`main` and any branch off it carry upstream's minimal `.gitignore`, which does NOT ignore `.env`.** This clone is additionally protected by `.git/info/exclude` and a gitleaks pre-commit hook, neither of which survives a fresh clone.
 
-**The disaster scenario:** Check out `integration/external` → `git add .` → `.env` with Cloudflare tokens gets staged → push → keys permanently burned.
+**The disaster scenario:** check out `main` or a feature branch → `git add .` → `docs/deploy/.env` with Cloudflare tokens gets staged → push to the PUBLIC repo → keys burned. This is not hypothetical: a production Cloudflare token sat in this public repo from 2025-12-10 until it was found and rotated on 2026-09-30.
 
 ### Rules
 
-1. **Never `git add .` on `integration/external`** — its `.gitignore` won't protect local files
+1. **Never `git add .` on `main` or a branch off it** — upstream's `.gitignore` won't protect local files
 2. **Never `git add -f` or `git add --force`** without explicit user approval
 3. **Verify branch before any push:**
    ```bash
