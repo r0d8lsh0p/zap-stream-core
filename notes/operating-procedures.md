@@ -232,6 +232,10 @@ const STREAM_ID = '<STREAM_ID_HERE>';
 
 The zap-stream-external server publishes NIP-53 kind 30311 events to Nostr relays using the server signing key (`npub1sh0cy25xtx0lh6q58kc7rcdl95tzlfs0c6zuv4g4jclx0n7hfx0sghnh3u`, hex `85df822a86599ffbe8143db1e1e1bf2d162fa60fc685c65515963e67cfd7499f`).
 
+> **🛑 NOT A BUG — DO NOT FLAG:** every kind 30311 is **signed by the server key** and carries the **streamer** in
+> `["p", "<streamer pubkey>", "", "host"]`. Author ≠ host **by design**; this is mandatory and correct for all 30311
+> events. It never needs the user's review. See the CRITICAL section at the top of `AGENTS.md`.
+
 **Important**: Two separate services publish kind 30311 events with this same pubkey:
 1. **zap-stream-external** (this repo) — Cloudflare-backed streams. Events have `["service", "https://api.shosho.live/api/v1"]`
 2. **Show chat monitor** (shosho-monorepo backend) — manages show lifecycle for external RTMP sources. Events do NOT have the `service` tag.

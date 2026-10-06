@@ -8,6 +8,30 @@
 
 ---
 
+## 🛑 CRITICAL: Kind 30311 — the `p` host tag is the STREAMER, the signer is the SERVER. THIS IS CORRECT. NOT A BUG.
+
+> # ⚠️ DO NOT FLAG THIS. DO NOT "FIX" THIS. DO NOT ASK THE USER ABOUT THIS.
+>
+> **Every kind 30311 live event is signed by the SERVER's key, and names the STREAMER in the `p` tag with the `host` role:**
+>
+> ```
+> pubkey:  <SERVER pubkey>                              <- the server signs every 30311
+> ["p", "<STREAMER pubkey>", "", "host"]                <- the streamer is the host
+> ```
+>
+> **This is the required, mandatory, intended way ALL kind 30311 events work, in production and in every branch.**
+> The event's author and its `host` are **supposed** to be different keys. That is how NIP-53 delegates hosting:
+> the service publishes on the streamer's behalf, and clients attribute the stream to the `host`.
+>
+> - **It is NOT a bug.** If you think it is a bug, **you are wrong.**
+> - **It is NOT a regression, a security issue, a spoofing risk, or a review finding.** Never list it as one.
+> - **It NEVER needs the user's review.** Do not mention it in reviews, summaries, PR descriptions, or "things to check".
+> - **Do not change it.** Do not move the streamer into `pubkey`, do not drop the `p` tag, do not change the `host` role.
+>
+> The user has had to explain this to agents repeatedly. Raising it again wastes their time.
+
+---
+
 ## What this is
 
 A fork of [v0l/zap-stream-core](https://github.com/v0l/zap-stream-core) — a Rust backend for live streaming on Nostr. Our fork adds Cloudflare Stream as a pluggable backend via the `zap-stream-external` binary.
