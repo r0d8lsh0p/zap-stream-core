@@ -1,7 +1,6 @@
 # Deployment model
 
-**Status: staging migrated 2026-10-02. PRODUCTION IS STILL ON THE OLD MODEL.**
-Until production is migrated, both models are live at once — see "Current state".
+**Status: staging migrated 2026-10-02, production migrated 2026-10-05. Both use the new model.**
 
 ## Why this changed
 
@@ -92,23 +91,30 @@ comma-separated string into `Vec<String>` and the service crash-loops. Put relay
 
 | | Branch | Model |
 |---|---|---|
-| Staging | `feat/planned-shows` (any feature branch) | **New** — migrated 2026-10-02 |
-| Production | `railway/external` | **Old** — `railway.toml` + baked config + migration file |
+| Staging | any feature branch off `main`, pointed at in the dashboard | **New** — migrated 2026-10-02 |
+| Production | `shosho-production` (upstream `main` + merged feature PRs) | **New** — migrated 2026-10-05 |
+
+Production's first deploy on `shosho-production` (`6e26249`, upstream `main` exactly) succeeded on 2026-10-05 at
+22:37 UTC after three failed attempts. Its logs are plain text, as expected now that JSON logging isn't carried.
 
 Verified on staging: `Using LNURL payment backend: rb@rodbishop.nz` (injected config
 replaced upstream's `lnd`), all 4 relays from `APP_CONFIG_YAML` connected, zero config
 or migration errors.
 
-## Migrating production (not yet done)
+## Shipping to production
 
-1. Record prod's current stored service settings, especially Dockerfile path — expect it
-   to be stale and wrong.
-2. Delete the fork migration row from the prod DB. Capture the row first; restore SQL
-   pattern is in `/tmp/zsx-staging-migration-restore.sql` from the staging run.
-3. Set `APP_CONFIG_YAML` on prod; delete `APP__RELAYS` if present.
-4. Point the prod service at the branch; expect the first deploy to fail; then set
-   Dockerfile path and Custom Start Command, clear Pre-deploy, redeploy.
-5. Only after prod is migrated can `dev/external` and `railway/external` be retired.
+1. Test the feature branch: locally first, then point staging at it.
+2. Open a PR from the feature branch into `shosho-production`. **Merging it deploys production** and needs the user's
+   approval.
+3. **Merge with a merge commit, never squash or rebase-merge.** Production then holds the same commits as the upstream
+   PR from the same branch, so syncing upstream later is clean.
+4. Never force-push a branch with an open PR; review fixes go on as new commits.
+5. Sync production with upstream by merging `upstream/main` into `shosho-production` through a PR, never by rebasing.
 
-Rollback at any point: restore the migration row, re-point the service at
-`railway/external`, and the old model works again unchanged.
+## The old model (retired 2026-10-05)
+
+`dev/external` → `railway/external` carried the deploy stack. Production no longer deploys from `railway/external`;
+it is kept only as a rollback target. `dev/external` now holds just the agent docs and the local test harness.
+
+Rollback: restore the fork migration row in the production DB, then point the production service back at
+`railway/external`. The old model works again unchanged.

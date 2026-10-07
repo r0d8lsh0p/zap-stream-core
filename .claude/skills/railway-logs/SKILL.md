@@ -70,5 +70,5 @@ tmpdir=$(mktemp -d) && cd "$tmpdir" \
 
 - Read-only operations only — no write/deploy/delete
 - Always use a temp directory for `railway link` to avoid associating this repo
-- The production service auto-deploys from `railway/external` — never push without user approval
+- The production service deploys `shosho-production` — changes reach it only by merged PR, with user approval
 - Logs contain structured JSON (LOG_FORMAT=json is set in production)

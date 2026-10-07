@@ -2,10 +2,9 @@
 
 **READ THIS BEFORE ANY GIT OPERATIONS OR COMMITS**
 
-> **UPDATED 2026-10-02.** Two things in older copies of this file were wrong:
-> `integration/external` **was deleted on 2026-09-28** and must not be recreated, and
-> `dev/external` **no longer auto-deploys staging** (staging points at feature
-> branches). See `notes/deployment-model.md`.
+> **UPDATED 2026-10-07.** Production moved to the new model on 2026-10-05 and deploys `shosho-production`.
+> `railway/external` is retired (rollback only), `dev/external` deploys nothing, and `integration/external` was
+> deleted on 2026-09-28. See `notes/deployment-model.md`.
 
 This document consolidates hard-won lessons from real incidents. Every rule exists because something went wrong.
 
@@ -14,37 +13,34 @@ This document consolidates hard-won lessons from real incidents. Every rule exis
 ## Branch Structure
 
 ```
-dev/external               <-- daily work, local testing
-                               Railway staging auto-deploys from this branch
-  |
-  ├── PR + merge ────────► railway/external       <-- production deployment
-  |                            PUSHES TO ORIGIN AUTO-DEPLOY PRODUCTION
-  |
-  (integration/external was DELETED 2026-09-28 — branch off main for upstream PRs)
-                               NO Railway config, NO agent files, NO local dev tooling
+upstream/main ──► main            <-- pure mirror. NEVER commit here.
+                    └── feat/x    <-- all code. Point staging at it; PR it into shosho-production and upstream.
+
+shosho-production                 <-- PRODUCTION deploys this. Changes arrive only by merged PR.
+dev/external                      <-- docs and local test harness only. Deploys nothing.
+railway/external                  <-- retired 2026-10-05, rollback only. Deploys nothing.
 ```
 
 ### Branch Rules
 
 | Branch | Purpose | Push to origin? |
 |--------|---------|-----------------|
-| `dev/external` | Staging area for production promotions; home of these docs. Keep feature code OFF it. | No longer auto-deploys staging |
-| `railway/external` | Production deploy | **DANGEROUS** — auto-deploys **production**. User approval required |
-| `feat/*` off `main` | Upstream-submittable code; point Railway staging here to test | Deploys unmodified |
-| Feature branches | WIP from `dev/external` | Yes — safe to push |
-| `upstream-main` | Local upstream tracking | **NEVER PUSH** — lacks our .gitignore |
+| `main` | Mirror of `upstream/main` | **Never** commit or push your own work |
+| `feat/*` off `main` | All code changes; staging is pointed here to test | Yes. It redeploys staging only if staging is on that branch |
+| `shosho-production` | Production deploy | **Never push.** Merge PRs only, with user approval, using a **merge commit** (not squash) |
+| `dev/external` | Agent docs, notes, skills, local harness | Yes — deploys nothing. Keep feature code off it |
+| `railway/external` | Retired production branch, rollback only | **Never** |
 
 ---
 
-## Railway Auto-Deploy Warning
+## Production Auto-Deploy Warning
 
-**Pushing to `railway/external` on origin = IMMEDIATE PRODUCTION DEPLOYMENT.**
+**Merging into `shosho-production` = IMMEDIATE PRODUCTION DEPLOYMENT.**
 
-- No staging period, no manual approval, no delay
-- Before ANY push to `railway/external`, confirm with user: "Is deployment intended right now?"
-- If unsure: **STOP. Do not push.**
-
-**Pushing to `dev/external` no longer deploys anything** — staging points at feature branches. Production still deploys from `railway/external`.
+- Before merging any PR into `shosho-production`, confirm with the user: "Is deployment intended right now?"
+- Use a merge commit, so production keeps the same commits as the upstream PR.
+- Never force-push a branch with an open PR.
+- If unsure: **STOP. Do not merge.**
 
 ---
 
@@ -52,7 +48,7 @@ dev/external               <-- daily work, local testing
 
 **Each branch has its OWN `.gitignore`.** Files ignored on one branch may be TRACKABLE on another.
 
-`dev/external` and `railway/external` have expanded `.gitignore` entries that protect local files. **`main` and any branch off it carry upstream's minimal `.gitignore`, which does NOT ignore `.env`.** This clone is additionally protected by `.git/info/exclude` and a gitleaks pre-commit hook, neither of which survives a fresh clone.
+`dev/external` has expanded `.gitignore` entries that protect local files. **`main` and any branch off it carry upstream's minimal `.gitignore`, which does NOT ignore `.env`.** This clone is additionally protected by `.git/info/exclude` and a gitleaks pre-commit hook, neither of which survives a fresh clone.
 
 **The disaster scenario:** check out `main` or a feature branch → `git add .` → `docs/deploy/.env` with Cloudflare tokens gets staged → push to the PUBLIC repo → keys burned. This is not hypothetical: a production Cloudflare token sat in this public repo from 2025-12-10 until it was found and rotated on 2026-09-30.
 

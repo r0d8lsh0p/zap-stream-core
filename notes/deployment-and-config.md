@@ -1,9 +1,8 @@
 # Deployment & Configuration Guide for zap-stream-external
 
-> **SUPERSEDED FOR STAGING (2026-10-02).** Staging now deploys any branch off `main`
-> unmodified, with everything Railway needs held outside git. **Read
-> `notes/deployment-model.md` first.** The content below still describes how
-> **PRODUCTION** works, and remains accurate until production is migrated.
+> **Read `notes/deployment-model.md` first.** Since 2026-10-05 staging and production both deploy branches built on
+> `main` unmodified, with config supplied by Railway (`APP_CONFIG_YAML`). Sections below that describe baked config,
+> `railway.toml` or `railway/external` describe the **retired** model, kept for rollback.
 
 
 ## How the binary loads configuration
@@ -47,22 +46,22 @@ Source: `docs/deploy/config.railway.external.yaml` header comment explains this.
 
 ## How production deployment works (Railway)
 
-1. Railway detects a push to `railway/external` on origin
-2. Railway builds the Docker image using `crates/zap-stream-external/Dockerfile`
-3. The Dockerfile copies `docs/deploy/config.railway.external.yaml` as `/app/config.yaml` into the image (line 35)
-4. At runtime, Railway injects secrets as env vars (`APP__DATABASE`, `APP__NSEC`, `APP__CLOUDFLARE__TOKEN`, `APP__CLOUDFLARE__ACCOUNT_ID`, `APP__ENDPOINTS_PUBLIC_HOSTNAME`)
-5. The binary loads `config.yaml` then overlays the env vars — secrets take effect because they are commented out in the config file
-6. On startup, the binary auto-registers the Stream webhook with Cloudflare (`PUT /stream/webhook`)
+1. Railway deploys when the branch it is pointed at changes: `shosho-production` for production, a feature branch for
+   staging
+2. Railway builds upstream's unmodified `crates/zap-stream-external/Dockerfile`
+3. The start command writes the `APP_CONFIG_YAML` variable to `/app/config.yaml`, replacing the upstream default baked
+   into the image, then starts the binary
+4. Secrets are separate env vars (`APP__DATABASE`, `APP__NSEC`, `APP__CLOUDFLARE__TOKEN`,
+   `APP__CLOUDFLARE__ACCOUNT_ID`, `APP__PUBLIC_URL`); the binary loads `config.yaml`, then overlays them
+5. On startup, the binary auto-registers the Stream webhook with Cloudflare (`PUT /stream/webhook`)
 
-**Staging** works identically but deploys from `dev/external`.
+Exact service settings are in `notes/deployment-model.md`.
 
 **Cloudflare notification policy** (one-time per account): The `live_input.connected` and `live_input.disconnected` events require a separate notification policy configured via the Cloudflare Alerting API. This is NOT auto-created on startup (see r0d8lsh0p/shosho-monorepo#824). Follow `docs/CLOUDFLARE_BACKEND.md` step 4 for setup. The API token needs both **Stream** and **Notifications** permissions.
 
-**The Dockerfile differs between branches.** This is a direct edit, not a Docker override:
-- `main` (and any branch off it): `COPY crates/zap-stream-external/config.yaml /app/config.yaml` (upstream default). Under the new model this baked file is REPLACED at boot by the start command writing `APP_CONFIG_YAML`.
-- `dev/external` / `railway/external`: `COPY docs/deploy/config.railway.external.yaml /app/config.yaml` (our production config)
-
-When cherry-picking commits that modify the Dockerfile, watch for conflicts on this line.
+**Deployed branches use upstream's Dockerfile unchanged.** It bakes upstream's default `config.yaml`, which the start
+command replaces at boot with `APP_CONFIG_YAML`. Only the retired `railway/external` carries the old Dockerfile change
+that baked `docs/deploy/config.railway.external.yaml`.
 
 ## How local Docker testing works
 
@@ -164,7 +163,7 @@ Getting this wrong means the service silently uses the wrong credentials.
 
 ### 5. Do not edit the Dockerfile on `main` to reference railway-specific files
 
-The Dockerfile on `main` must reference only upstream-compatible paths. Under the new model NO Railway-specific Dockerfile change is needed at all — the config is written at boot instead. The old baked-config Dockerfile change survives only on `railway/external` until production is migrated.
+The Dockerfile on `main` must reference only upstream-compatible paths. Under the new model NO Railway-specific Dockerfile change is needed at all — the config is written at boot instead. The old baked-config Dockerfile change survives only on the retired `railway/external`.
 
 ### 6. NEVER delete a migration file that has been applied to production
 

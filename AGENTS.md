@@ -57,90 +57,55 @@ Key source files in `zap-stream-external`:
 
 ## Branch strategy
 
-> **READ `notes/deployment-model.md` FIRST.** The deployment model changed on
-> 2026-10-02. Staging now deploys **any branch off `main`, unmodified** — nothing
-> Railway needs lives in git any more. Production has **not** been migrated yet and
-> still uses the older deploy-stack model described further down.
+> **READ `notes/deployment-model.md` FIRST.** Since 2026-10-05 **both staging and production deploy branches built on
+> upstream `main`, unmodified.** Nothing Railway needs lives in git: settings and config live in Railway. There is no
+> deploy stack and no cherry-picking.
 
 ```
-upstream/main ──(ff mirror)──► main     <-- pure mirror of v0l/zap-stream-core. NEVER commit here.
+upstream/main ──(ff mirror)──► main                <-- pure mirror of v0l/zap-stream-core. NEVER commit here.
                                  │
-                                 └── feat/x ──┬──► PR to v0l/zap-stream-core (upstream)
-                                              │
-                                              └──► point Railway STAGING at this branch
-                                                   (deploys unmodified — no deploy stack)
+                                 └── feat/x ──┬──► point Railway STAGING at feat/x   (test it alone)
+                                              ├──► PR into shosho-production          (PRODUCTION deploys on merge)
+                                              └──► PR into v0l/zap-stream-core main   (upstream)
 
-dev/external ──► railway/external       <-- OLD model, PRODUCTION ONLY until migrated
+shosho-production   <-- what Railway PRODUCTION deploys. upstream main + our merged feature PRs.
 ```
 
-### How to ship a change (new model — staging)
+### How to ship a change
 
 ```bash
 git switch -c feat/x main       # branch off main, the upstream mirror
 # ...write code, commit...      # code only; nothing Railway-specific
-git push -u origin feat/x       # then point Railway staging at feat/x in the dashboard
+git push -u origin feat/x       # point Railway staging at feat/x in the dashboard, test it
+gh pr create --repo r0d8lsh0p/zap-stream-core --base shosho-production --head feat/x   # production
+gh pr create --repo v0l/zap-stream-core --base main --head r0d8lsh0p:feat/x            # upstream, later
 ```
 
-That is the whole flow. No cherry-picks, no shared branch, each change tested alone.
-Raise the upstream PR from the same branch. Settings and config live in Railway — see
-`notes/deployment-model.md` for the exact start command and variables.
+The same branch feeds staging, production and upstream, so every commit has one hash everywhere.
 
-### Production (old model, until migrated)
+### Rules that keep production and upstream in step
 
-Production still deploys from `railway/external`, which carries the deploy stack
-(`railway.toml`, baked `config.railway.external.yaml`, the fork migration file). To ship
-to production today you still need the old two-step flow:
-
-```bash
-git switch dev/external && git cherry-pick feat/x
-git push origin dev/external                     # (no longer deploys staging)
-git push origin dev/external:railway/external    # production — user approval required
-```
-
-**THE RULE: never commit directly to `railway/external`.** It only ever receives a commit already validated elsewhere.
-
-`dev/external` no longer auto-deploys staging (staging points at feature branches), so it
-is now just the staging area for production promotions and the home of these docs. Keep
-feature code OFF it — that is what caused the Sept 2026 collision.
+- **Merge PRs into `shosho-production` with a merge commit — never squash or rebase-merge.** Production then carries the
+  same commits as the upstream PR, and syncing upstream later is clean. A squash creates a different commit with the
+  same content, which duplicates or conflicts on the next sync.
+- **Never force-push a branch with an open PR.** Review fixes go on as new commits.
+- **Sync production with upstream by merging, not rebasing:** merge `upstream/main` into `shosho-production` (via a PR).
+  Once upstream has merged one of our PRs, that merge brings nothing new for it.
+- **Merging into `shosho-production` deploys production.** It needs the user's explicit approval. Never push to it
+  directly.
 
 ### Branch rules
 
-- **`main`** — a pure fast-forward **mirror of `upstream/main`**. Never commit here. Sync with `git fetch upstream && git branch -f main upstream/main`. Because it is a true mirror, any feature branch off `main` is upstream-submittable **by construction**.
-- **`dev/external`** — `main` plus the deploy patch stack. Railway **staging** auto-deploys on push. Safe to test freely.
-- **`railway/external`** — the same commit as `dev/external`. Railway **production** auto-deploys on push. **Never push without explicit user approval** — the single most dangerous action in this repo.
+- **`main`** — a pure fast-forward **mirror of `upstream/main`**. Never commit here. Sync with
+  `git fetch upstream && git branch -f main upstream/main`. Any branch off `main` is upstream-submittable **by
+  construction**.
+- **`shosho-production`** — Railway **production** deploys it. Changes arrive only by merged PR, with user approval.
+- **`dev/external`** — **docs only**: `AGENTS.md`, `notes/`, `.claude/skills/` and the local test harness. Deploys
+  nothing. Never put feature code on it.
+- **`railway/external`** — **retired 2026-10-05**, kept for rollback only (see `notes/deployment-model.md`). Deploys
+  nothing. Do not push to it.
 
-`integration/external` was **retired and deleted 2026-09-28**. It existed only because `main` used to be divergent from upstream. Do not recreate it.
-
-### Upstream sync (periodic — the one exception)
-
-Rebasing the stack onto a new `main` rewrites history, so this round *does* need force-pushes:
-
-```bash
-git fetch upstream && git branch -f main upstream/main
-git rebase --onto main <old-main-sha> dev/external
-# force-push dev/external -> validate on staging -> force-push railway/external to match
-```
-
-### Allowed divergences on `dev/external` and `railway/external`
-
-`dev/external` = `main` + ONLY these categories. **Verify with `git diff main..dev/external --name-only`** — the only `.rs` file that may appear is `crates/zap-stream-external/src/main.rs`.
-
-| Category | Files |
-|----------|-------|
-| Railway deployment config | `railway.toml`, `docs/deploy/config.railway.external.yaml`, `docs/RAILWAY.md` |
-| Dockerfile config path | `crates/zap-stream-external/Dockerfile` — COPY line changed to use `config.railway.external.yaml` |
-| Structured JSON logging | `crates/zap-stream-external/src/main.rs` (`LOG_FORMAT=json` support), `Cargo.toml` (`json` feature on tracing-subscriber) |
-| Production data migration | `crates/zap-stream-db/migrations/20260224000000_migrate_cf_uid_to_external_id.sql` — already applied to the prod DB. **Cannot be deleted**: SQLx aborts at startup if a previously-applied migration file is missing. |
-| Local dev config | `docs/deploy/config.local.external.yaml` |
-| Local dev docker compose | `docs/deploy/docker-compose.override.yml` |
-| Gitignore additions | `.gitignore` — entries for `.env`, local dev data |
-| Agent documentation | `AGENTS.md`, `CLAUDE.md`, `notes/`, `.claude/skills/` |
-
-**If a change does not fit a category above, it belongs upstream** — branch from `main` and PR to `v0l/zap-stream-core`. Ask before adding a new divergence category.
-
-### CRITICAL: Production safety
-
-**Pushing to `railway/external` on origin auto-deploys production.** Never push without explicit user approval.
+`integration/external` was **retired and deleted 2026-09-28**. Do not recreate it.
 
 ## Operational warnings (not obvious from the code)
 
@@ -148,34 +113,30 @@ git rebase --onto main <old-main-sha> dev/external
 - **Upstream's GitHub Actions are disabled at the repo level, and that state is NOT in git.** `docker-build.yml` and `docker-pr.yml` publish to *upstream's* Docker Hub (`voidic`) using a `DOCKER_TOKEN` this fork does not have; `docker-build.yml` failed on every push to `main`. Both are `state=disabled_manually` via `gh workflow disable`. Re-enable with `gh workflow enable <id>`. The state is keyed by file path, so **if upstream renames or adds a workflow it arrives active and may start failing — check Actions after each `main` sync.**
 - **There is no CI that builds or tests `zap-stream-external`.** Upstream's workflows only build `crates/zap-stream/Dockerfile` and `crates/n94-bridge/Dockerfile`, neither of which we deploy. Railway's "Wait for CI" therefore has nothing to gate on. Adding fork CI is feasible and cheap: the crate has **zero ffmpeg deps** and **zero `sqlx::query!` macros**, needs only `protobuf-compiler`, and all E2E tests are `#[ignore]`d so `cargo test -p zap-stream-external` runs just the unit tests.
 - **Production's Cloudflare token lacks Account Alerting permission.** Startup logs `Failed to setup notification policy: 403 Authentication error` on every boot. Pre-existing and harmless while the webhook destination already exists — but production cannot self-heal its notification policy if it ever needs re-creating.
-- **Deleting a stream publishes a NIP-09 request, which relays may ignore.** Observed 2026-09-28: only 2 of 4 public relays honoured it. The kind 30311 is replaced with `status=ended` regardless, so it stops advertising as live.
+- **Deleting a stream publishes a NIP-09 request, which relays may ignore.** Observed 2026-09-28: only 2 of 4 public relays honoured it. Nothing else changes: the stream row, its stored event and any custom key are left as they are, so on relays that ignore the request the event stays visible.
+- **The stored `event` on a stream is upstream's last-built event, not a record of what is on the network.** Core stores the ended event before publishing it and keeps it if the publish fails, and delete keeps it after the relays delete it.
+- **Local E2E and staging share one Cloudflare webhook.** The dev Cloudflare account allows one Stream webhook URL and one notification destination. Whichever of the local harness and staging booted last receives `live_input.*` webhooks; the other gets none, and E2E tests time out waiting for "connected". Redeploy staging after local testing to give it back.
 
 ## Git ops workflow
 
-1. Work on a feature branch **off `main`** (not off a deploy branch)
-2. **Run cargo tests** — `cargo test -p zap-stream-external` and `cargo test -p zap-stream-db`
+1. Work on a feature branch **off `main`**
+2. **Run cargo tests** — `cargo test --workspace`
 3. **Run local Docker E2E tests** — entirely on this machine, nothing deployed. See "Local dev test environment" below
-4. **Cherry-pick onto `dev/external`** — a local commit only; deploys nothing until it is pushed
-5. **`git push origin dev/external`** — **THIS DEPLOYS STAGING.** Needs the user's say-so; "test it" does not mean this
-6. **Promote to `railway/external`** — `git push origin dev/external:railway/external` (user approval required)
-7. **PR the feature branch to `v0l/zap-stream-core`** for upstreaming
+4. **Push the feature branch and point Railway staging at it** — needs the user's say-so
+5. **PR it into `shosho-production`** — merging deploys production (user approval required; merge commit, not squash)
+6. **PR the same branch to `v0l/zap-stream-core`** for upstreaming
 
 ### CRITICAL: "local" means local. It never means staging.
 
-A request to "test locally" is satisfied entirely by steps 2-4 on this machine. It is **never** satisfied by pushing.
+A request to "test locally" is satisfied entirely by steps 2-3 on this machine. It is **never** satisfied by pushing.
 
-Staging deploys **only on `git push origin dev/external`** — Railway watches the *remote* branch. Committing or
-cherry-picking onto a local `dev/external` deploys nothing; `git status -sb` showing `[ahead 1]` means staging has
-**not** seen the change. Confirm with `git branch -r --contains <sha>`: empty output means it never left this machine.
-
-**Local Docker E2E has to run from a checked-out `dev/external`** — `docs/deploy/docker-compose.override.yml` and
-`docs/deploy/config.local.external.yaml` are deploy-branch-only files, so they do not exist on a feature branch. That
-is the *only* reason to cherry-pick before testing, and it does not imply a push. Cherry-pick, run the harness, and
-leave the branch unpushed until the user asks for staging.
+Pushing a branch deploys nothing by itself. Staging deploys whichever branch Railway is pointed at, so pushing *that*
+branch redeploys staging. Check which branch staging is on before pushing to it.
 
 ### Local layout
 
-A **single checkout**, no worktrees: `zap-stream-core-fork/`. Switch it between `main`, `dev/external` and `railway/external` as needed. It holds the canonical gitignored `docs/deploy/.env` — never delete or overwrite that file.
+A **single checkout**, no worktrees: `zap-stream-core-fork/`. It holds the canonical gitignored `docs/deploy/.env` —
+never delete or overwrite that file.
 
 ## Testing
 
@@ -195,7 +156,7 @@ cargo test
 **This runs wholly on this machine and deploys nothing.** The stack is a local MariaDB plus a `zap-stream-external`
 built from the working tree, publishing Nostr events to a local relay only. Two things do reach the outside world, by
 design: Cloudflare Stream API calls (dev account), and the cloudflared tunnel that lets Cloudflare's webhooks back in.
-Neither is staging. Staging is only ever touched by `git push origin dev/external`.
+Neither is staging.
 
 Local integration testing uses Docker Compose with a self-contained override file. The setup lives in `docs/deploy/`:
 
@@ -204,7 +165,7 @@ Local integration testing uses Docker Compose with a self-contained override fil
 | `docker-compose.override.yml` | Yes | Self-contained compose: MariaDB + external binary built from source |
 | `config.local.external.yaml` | Yes | Local config: test relay (`ws://host.docker.internal:3334`), secrets commented out |
 | `.env` | **No** (gitignored) | Local secrets: CF token, nsec, tunnel URL, DB password |
-| `config.railway.external.yaml` | Yes | Production config baked into Docker image by Railway |
+| `config.railway.external.yaml` | Yes | Legacy: was baked into the image. Railway now takes config from `APP_CONFIG_YAML` |
 
 **Setup (one-time):**
 1. Copy `.env` template and fill in real values (CF dev account credentials, dev nsec)
@@ -227,12 +188,31 @@ Local integration testing uses Docker Compose with a self-contained override fil
 - Cloudflare API calls are external by design (testing a real CF integration)
 - Port 8090 on host maps to 8080 in container (8080 is often occupied by other services)
 
+**Testing a feature branch.** The harness files above exist only on `dev/external`, and a feature branch off `main`
+must be tested without them in its tree. Copy them out of git into `/tmp` and build the checked-out feature branch:
+
+```bash
+mkdir -p /tmp/zs-harness
+git show origin/dev/external:docs/deploy/config.local.external.yaml > /tmp/zs-harness/config.local.external.yaml
+# write /tmp/zs-harness/docker-compose.yml from docs/deploy/docker-compose.override.yml on dev/external, with
+#   build.context = <absolute repo path>, the config volume = /tmp/zs-harness/config.local.external.yaml and
+#   env_file = <absolute repo path>/docs/deploy/.env
+set -a && . docs/deploy/.env && set +a
+docker compose -p zsfeat -f /tmp/zs-harness/docker-compose.yml up --build -d    # own project = fresh database
+# ... run the E2E tests as above ...
+docker compose -p zsfeat -f /tmp/zs-harness/docker-compose.yml down -v          # -v drops the test database
+```
+
+This tests exactly the feature branch, with nothing from `dev/external` in the build. `/tmp` is cleared on reboot, so
+recreate the files each session.
+
 See `crates/zap-stream-external/tests/TESTING_README.md` for the full E2E test playbook.
 
 ## Git safety
 
-- **Never push `railway/external` without user approval** — auto-deploys production
-- **Never commit to `railway/external` or `main`** — `railway/external` only receives validated `dev/external` commits; `main` is a pure upstream mirror
+- **Never push to `shosho-production`** — it auto-deploys production and only receives merged PRs, with user approval
+- **Never commit to `main`** — it is a pure upstream mirror
+- **Never force-push a branch with an open PR**
 - **Never `git add .` on `main`** — `main` mirrors upstream and has upstream's minimal `.gitignore`, so local files (`.env`, dev data) are NOT ignored there and could be exposed. The full `.gitignore` is a deploy-branch divergence.
 - **Never `git add -f`** to bypass `.gitignore` without explicit user approval
 - **Verify branch before any push**: `git branch --show-current`
