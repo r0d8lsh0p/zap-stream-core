@@ -22,9 +22,9 @@ Loading order (later sources override earlier):
 2. `APP__*` environment variables — overlay on top (e.g. `APP__DATABASE`, `APP__NSEC`, `APP__CLOUDFLARE__TOKEN`)
 3. `config.dev.yaml` — optional, only in debug builds
 
-**Critical**: If a key has a value in `config.yaml`, the env var for that key is **ignored**. The `config` crate loads files first, then env vars, but file values take precedence over env vars for the same key. To allow env var override, the key must be **commented out** in the config file.
-
-Source: `docs/deploy/config.railway.external.yaml` header comment explains this.
+**Env vars override the file.** Later sources win, so `APP__NSEC` replaces a `nsec:` set in `config.yaml`. Verified by
+the `env_overrides_file_scalar` unit test. (Corrected 2026-10-12: earlier versions of these notes said the opposite.)
+Caveats for `payments` and list values are in `docs/deploy/config.railway.external.yaml`'s header.
 
 ## Config files in this repo
 
@@ -33,8 +33,8 @@ Source: `docs/deploy/config.railway.external.yaml` header comment explains this.
 | File | Branch | Purpose |
 |------|--------|---------|
 | `crates/zap-stream-external/config.yaml` | All (from upstream) | Upstream maintainer's local dev defaults. Placeholder values (`kieran.lan`, dummy CF creds). Used by `cargo run` from the crate directory. |
-| `docs/deploy/config.railway.external.yaml` | `dev/external`, `railway/external` | Production config baked into Docker image. Secrets are commented out so Railway env vars can override them. |
-| `docs/deploy/config.local.external.yaml` | `dev/external`, `railway/external` | Local dev config. Points to local test relay (`ws://host.docker.internal:3334`). Secrets commented out so `.env` vars can override them. |
+| `docs/deploy/config.railway.external.yaml` | `dev/external`, `railway/external` | Production config baked into Docker image. Secrets are commented out to keep them out of git. |
+| `docs/deploy/config.local.external.yaml` | `dev/external`, `railway/external` | Local dev config. Points to local test relay (`ws://host.docker.internal:3334`). Secrets commented out to keep them out of git; `.env` supplies them. |
 | `docs/deploy/compose-config.yaml` | All (from upstream) | Config template for the **old** `zap-stream` binary. Not used by `zap-stream-external`. |
 
 ### Untracked files (gitignored, contain secrets)
@@ -154,12 +154,12 @@ Before creating a new config file, identify exactly what will load it and how. C
 
 ### 4. Understand the config precedence before making changes
 
-The `config` crate's precedence means:
-- If `config.yaml` has `nsec: "nsec1abc..."`, then `APP__NSEC=nsec1xyz...` is **ignored**
-- To allow env var override, the key must be **commented out** in the YAML file
-- This is why both `config.railway.external.yaml` and `config.local.external.yaml` have secrets commented out
-
-Getting this wrong means the service silently uses the wrong credentials.
+Env vars override file values (later sources win):
+- If `config.yaml` has `nsec: "nsec1abc..."` and `APP__NSEC=nsec1xyz...` is set, **`nsec1xyz...` is used**
+- Secrets are commented out of both `config.railway.external.yaml` and `config.local.external.yaml` to keep them out of
+  git, not for precedence
+- Env vars **merge** into maps rather than replacing them, which is why `payments` must be switched by replacing the
+  file (see the `config.railway.external.yaml` header)
 
 ### 5. Do not edit the Dockerfile on `main` to reference railway-specific files
 

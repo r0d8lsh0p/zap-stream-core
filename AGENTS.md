@@ -135,8 +135,12 @@ branch redeploys staging. Check which branch staging is on before pushing to it.
 
 ### Local layout
 
-A **single checkout**, no worktrees: `zap-stream-core-fork/`. It holds the canonical gitignored `docs/deploy/.env` —
-never delete or overwrite that file.
+**Always use git worktrees.** `zap-stream-core-fork/` is the main checkout; do every piece of work in its own worktree
+under `/Users/bchq/projects/zap-stream/worktrees/<name>` (`git worktree add ../worktrees/<name> <branch>`), and remove it
+when done. Never switch the main checkout's branch to do work.
+
+The main checkout holds the canonical gitignored `docs/deploy/.env` — never delete or overwrite that file. Worktrees do
+not have it: reference it by absolute path (`/Users/bchq/projects/zap-stream/zap-stream-core-fork/docs/deploy/.env`).
 
 ## Testing
 
@@ -189,15 +193,15 @@ Local integration testing uses Docker Compose with a self-contained override fil
 - Port 8090 on host maps to 8080 in container (8080 is often occupied by other services)
 
 **Testing a feature branch.** The harness files above exist only on `dev/external`, and a feature branch off `main`
-must be tested without them in its tree. Copy them out of git into `/tmp` and build the checked-out feature branch:
+must be tested without them in its tree. Copy them out of git into `/tmp` and build the feature branch's worktree:
 
 ```bash
 mkdir -p /tmp/zs-harness
 git show origin/dev/external:docs/deploy/config.local.external.yaml > /tmp/zs-harness/config.local.external.yaml
 # write /tmp/zs-harness/docker-compose.yml from docs/deploy/docker-compose.override.yml on dev/external, with
-#   build.context = <absolute repo path>, the config volume = /tmp/zs-harness/config.local.external.yaml and
-#   env_file = <absolute repo path>/docs/deploy/.env
-set -a && . docs/deploy/.env && set +a
+#   build.context = <absolute worktree path>, the config volume = /tmp/zs-harness/config.local.external.yaml and
+#   env_file = /Users/bchq/projects/zap-stream/zap-stream-core-fork/docs/deploy/.env
+set -a && . /Users/bchq/projects/zap-stream/zap-stream-core-fork/docs/deploy/.env && set +a
 docker compose -p zsfeat -f /tmp/zs-harness/docker-compose.yml up --build -d    # own project = fresh database
 # ... run the E2E tests as above ...
 docker compose -p zsfeat -f /tmp/zs-harness/docker-compose.yml down -v          # -v drops the test database

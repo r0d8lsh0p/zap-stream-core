@@ -1,8 +1,8 @@
 # Local development config for zap-stream-external
 #
 # This file is mounted into the Docker container by docker-compose.override.yml,
-# replacing config.railway.external.yaml. Secrets are commented out so they can
-# be overridden by APP__* env vars loaded from .env.
+# replacing config.railway.external.yaml. Secrets are commented out to keep them
+# out of git; APP__* env vars from .env supply them (env vars override this file).
 #
 # See config.railway.external.yaml for the production equivalent.
 

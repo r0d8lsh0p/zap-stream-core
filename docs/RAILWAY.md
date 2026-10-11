@@ -72,17 +72,19 @@ See `CLOUDFLARE_BACKEND.md` for full Cloudflare setup including:
 
 ## Config File vs Environment Variables
 
-**THE RULE:** If a value exists in `config.railway.external.yaml`, Railway environment variables for that key are **COMPLETELY IGNORED**.
+**THE RULE:** Environment variables **override** values in the config file. The Rust `config` crate adds the
+Environment source after the file, and later sources win. Verified by the `env_overrides_file_scalar` unit test.
 
-The Rust `config` crate loads files first, then environment variables. If a key has a value from the YAML file, the environment variable is never checked.
+(Corrected 2026-10-12. An earlier version of this section said a value in the file made the env var "COMPLETELY
+IGNORED". That was wrong.)
 
-**This is why `config.railway.external.yaml` comments out all Railway-managed values:**
-- `# database:` → `APP__DATABASE` env var loads
-- `# public_url:` → `APP__PUBLIC_URL` env var loads
-- `# nsec:` → `APP__NSEC` env var loads
-- `# cloudflare:` → `APP__CLOUDFLARE__TOKEN` and `APP__CLOUDFLARE__ACCOUNT_ID` env vars load
+Secrets are still kept out of the config file, but so they stay out of git, not because the env var would be ignored.
 
-**Never uncomment Railway-managed values in `config.railway.external.yaml`** or you'll be debugging for hours why your environment variables aren't working.
+Two real caveats:
+- **`payments`** is a pick-one enum. Adding `APP__PAYMENTS__LNURL__ADDRESS` on top of a file that sets `payments.lnd`
+  merges the two and fails to deserialize. Replace the whole file to switch backend.
+- **List values** (`relays`) need `env_source()`'s list parsing (`feat/env-config-lists`). Without it, setting
+  `APP__RELAYS` crash-loops the service.
 
 ### Environment Variable Format
 
