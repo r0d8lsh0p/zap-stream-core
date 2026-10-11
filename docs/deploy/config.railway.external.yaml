@@ -6,7 +6,8 @@
 # file, and later sources win, so environment variables DO override file values.
 # Verified by unit test (see env_overrides_file_scalar).
 #
-# Two real caveats:
+# Two real caveats (both fixed on feat/env-config-lists, 27c4ca0 — see
+# notes/deployment-model.md):
 #  - `payments` is an externally-tagged pick-one enum. You cannot switch backend by
 #    adding APP__PAYMENTS__LNURL__ADDRESS on top of a file that sets payments.lnd --
 #    the two keys merge and deserialization fails. Replace the whole file instead.

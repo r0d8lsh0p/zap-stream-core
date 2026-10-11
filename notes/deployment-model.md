@@ -46,16 +46,26 @@ Service: `ZS Core with CF Stream`.
   `APP__CLOUDFLARE__ACCOUNT_ID`, `APP__PUBLIC_URL`. Env vars override the file, so
   secrets stay out of `APP_CONFIG_YAML`.
 
-`payments` **must** come from `APP_CONFIG_YAML`, not env vars: `PaymentBackend` is an
-externally-tagged pick-one enum (`lnd`/`bitvora`/`nwc`/`lnurl`) and upstream's baked
-config sets `payments.lnd`. Adding `APP__PAYMENTS__LNURL__ADDRESS` on top merges into a
-two-key map and fails to deserialize. Replacing the whole file is the only way to
-switch backend.
+### `APP_CONFIG_YAML` and the start command are retired by `feat/env-config-lists` (27c4ca0)
 
-`APP__RELAYS` must NOT be set on a branch without the list-parsing code (see
-`env_source()` on `feat/env-config-lists`). Plain `config::Environment` cannot parse a
-comma-separated string into `Vec<String>` and the service crash-loops. Put relays in
-`APP_CONFIG_YAML` instead.
+With that branch deployed, **every** setting is an `APP__*` env var against the stock image and the
+shim is unnecessary: `APP__RELAYS` is a comma-separated list, and a payment backend named in the
+environment (`APP__PAYMENTS__LNURL__ADDRESS`) *selects* it, discarding the `lnd` block in upstream's
+baked `config.yaml`. The baked file then supplies only harmless defaults (`listen_http: [::]:8080`,
+which stays in the file by decision — it is not an env var).
+
+Verified on Staging 2026-10-12: `APP_CONFIG_YAML` set to upstream's `config.yaml` byte-for-byte (so the
+shim wrote exactly what the image ships), `APP__RELAYS` set → LNURL backend from env, 4 relays, webhook
+registered, new live input read back with the configured retention. Cut-over per service: set
+`APP__RELAYS`, clear the custom start command, delete `APP_CONFIG_YAML`.
+
+**Until a service runs that branch**, the two original constraints still apply:
+
+- `payments` **must** come from `APP_CONFIG_YAML`, not env vars: `PaymentBackend` is an
+  externally-tagged pick-one enum and upstream's baked config sets `payments.lnd`. Adding
+  `APP__PAYMENTS__LNURL__ADDRESS` on top merges into a two-key map and fails to deserialize.
+- `APP__RELAYS` must NOT be set: plain `config::Environment` cannot parse a comma-separated string
+  into `Vec<String>` and the service crash-loops. Put relays in `APP_CONFIG_YAML` instead.
 
 ## Railway capabilities this relies on
 
