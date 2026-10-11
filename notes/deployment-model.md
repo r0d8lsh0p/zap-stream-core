@@ -56,10 +56,16 @@ which stays in the file by decision — it is not an env var).
 
 Verified on Staging 2026-10-12: `APP_CONFIG_YAML` set to upstream's `config.yaml` byte-for-byte (so the
 shim wrote exactly what the image ships), `APP__RELAYS` set → LNURL backend from env, 4 relays, webhook
-registered, new live input read back with the configured retention. Cut-over per service: set
-`APP__RELAYS`, clear the custom start command, delete `APP_CONFIG_YAML`.
+registered, new live input read back with the configured retention. Staging was then restored to its
+original `APP_CONFIG_YAML` with `APP__RELAYS` removed.
 
-**Until a service runs that branch**, the two original constraints still apply:
+**Staging KEEPS the shim (`APP_CONFIG_YAML` + start command) deliberately** — it runs feature branches
+forked from upstream `main` that lack this fix, and those crash with `APP__RELAYS` set or with a file
+that selects `lnd`. Never set `APP__RELAYS` on Staging. **Production** may retire the shim once
+`shosho-production` carries 27c4ca0: set `APP__RELAYS`, clear the custom start command, delete
+`APP_CONFIG_YAML` (in that order — deleting the variable first makes the shim write an empty file).
+
+**On any service not running that branch**, the two original constraints still apply:
 
 - `payments` **must** come from `APP_CONFIG_YAML`, not env vars: `PaymentBackend` is an
   externally-tagged pick-one enum and upstream's baked config sets `payments.lnd`. Adding
