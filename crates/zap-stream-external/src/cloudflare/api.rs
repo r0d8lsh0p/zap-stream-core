@@ -149,6 +149,19 @@ fn apply_video_asset_to_stream(stream: &mut UserStream, asset: &VideoAssetWebhoo
     changed
 }
 
+/// Cloudflare serves a current frame of the broadcast at the live input's thumbnail path
+/// while it is live, on the same host as its playback URLs
+fn get_live_thumbnail_url(input: &LiveInput) -> Result<String> {
+    let mut url: Url = input
+        .webrtc_playback
+        .as_ref()
+        .context("webrtc url is missing")?
+        .url
+        .parse()?;
+    url.set_path(&format!("{}/thumbnails/thumbnail.jpg", input.uid));
+    Ok(url.to_string())
+}
+
 /// Slugify a string for use as a download filename.
 /// Keeps alphanumeric, hyphens, and underscores; replaces spaces with hyphens;
 /// collapses consecutive hyphens; truncates to 120 characters.
@@ -464,6 +477,7 @@ impl CfApiWrapper {
             stream.endpoint_id = Some(endpoint.id);
             stream.ends = None;
             stream.external_input_id = Some(input.uid.clone());
+            stream.thumb = Some(get_live_thumbnail_url(input)?);
             self.db.update_stream(&stream).await?;
             self.register_input_mapping(&input.uid, &stream.id).await;
             return Ok(stream);
@@ -505,6 +519,7 @@ impl CfApiWrapper {
             stream.endpoint_id = Some(endpoint.id);
             stream.ends = None;
             stream.external_input_id = Some(input.uid.clone());
+            stream.thumb = Some(get_live_thumbnail_url(input)?);
             self.db.update_stream(&stream).await?;
             self.register_input_mapping(&input.uid, &stream.id).await;
             return Ok(stream);
@@ -530,6 +545,7 @@ impl CfApiWrapper {
             tags: user.tags.clone(),
             stream_key_id: None,
             external_input_id: Some(input.uid.clone()),
+            thumb: Some(get_live_thumbnail_url(input)?),
             ..Default::default()
         };
         self.db.insert_stream(&new_stream).await?;
@@ -1647,11 +1663,12 @@ fn build_alt_text(pubkey: &PublicKey, stream: &UserStream, client_url: &str) -> 
 mod tests {
     use super::{
         apply_custom_ingest_domain, apply_video_asset_to_stream, build_account_endpoints,
-        build_alt_text, build_stream_key, get_download_url, resolve_client_url, resolve_tos_url,
+        build_alt_text, build_stream_key, get_download_url, get_live_thumbnail_url,
+        resolve_client_url, resolve_tos_url,
         select_ingest_endpoint, should_skip_duplicate_webhook,
         billable_duration, cost_for_duration, slugify_title, ViewerCountTracker,
     };
-    use crate::cloudflare::{LiveInput, Playback, RtmpsEndpoint, SrtEndpoint, VideoAssetStatus, VideoAssetWebhook};
+    use crate::cloudflare::{LiveInput, Playback, RtmpsEndpoint, SrtEndpoint, VideoAssetStatus, VideoAssetWebhook, WebRtcEndpoint};
     use mockito::Server;
     use std::time::Duration;
     use nostr_sdk::Keys;
@@ -1985,6 +2002,28 @@ mod tests {
             stream.thumb.as_deref(),
             Some("https://example.com/thumb.jpg")
         );
+    }
+
+    #[test]
+    fn get_live_thumbnail_url_uses_playback_host_and_input_uid() {
+        let input = LiveInput {
+            webrtc_playback: Some(WebRtcEndpoint {
+                url: "https://customer-abc.cloudflarestream.com/input-uid/webRTC/play".to_string(),
+            }),
+            ..sample_input()
+        };
+
+        let url = get_live_thumbnail_url(&input).unwrap();
+        assert_eq!(
+            url,
+            "https://customer-abc.cloudflarestream.com/input-uid/thumbnails/thumbnail.jpg"
+        );
+    }
+
+    #[test]
+    fn get_live_thumbnail_url_requires_webrtc_playback() {
+        let input = sample_input();
+        assert!(get_live_thumbnail_url(&input).is_err());
     }
 
     #[test]
