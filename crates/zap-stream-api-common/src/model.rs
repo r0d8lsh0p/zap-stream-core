@@ -130,6 +130,7 @@ pub struct PatchEvent {
     pub status: Option<String>,
     pub starts: Option<DateTime<Utc>>,
     pub ends: Option<DateTime<Utc>>,
+    pub pinned: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
