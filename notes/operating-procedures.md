@@ -462,6 +462,8 @@ No output means the event has been deleted. Deletion is a request, not a guarant
 ### Prerequisites
 
 - Staging is deployed and healthy (check logs with procedure 1, using `--environment Staging`)
+- If staging runs a branch forked from upstream `main` (no 27c4ca0), `railway variables` must NOT contain
+  `APP__RELAYS` — the service crash-loops on it. Check before pointing staging at the branch
 - `node` and `nak` installed locally
 - A **persistent test nsec** — do NOT use a throwaway key, you need it to clean up afterwards.
   **It lives at `~/.config/zap-stream/smoke-test.nsec`** (mode 600, outside any git repo, bech32 `nsec1...` form).
@@ -530,17 +532,27 @@ SCRIPT
 SMOKE_NSEC=<your-test-nsec> node smoke.mjs
 ```
 
-**Step 3: Stream a test pattern (30 seconds)**
+**Step 3: Stream a test pattern (60 seconds)**
 
 ```bash
-ffmpeg -re -f lavfi -i "testsrc=size=1280x720:rate=30" \
+nohup ffmpeg -loglevel warning -re -f lavfi -i "testsrc=size=1280x720:rate=30" \
   -f lavfi -i "sine=frequency=1000:sample_rate=44100" \
   -c:v libx264 -preset veryfast -tune zerolatency \
   -g 60 -keyint_min 60 -sc_threshold 0 \
   -c:a aac -ar 44100 \
-  -f flv "rtmps://live.cloudflare.com:443/live/<stream-key>" \
-  -t 30
+  -t 60 \
+  -f flv "rtmps://live.cloudflare.com:443/live/<stream-key>" > /tmp/zs-smoke/ffmpeg.log 2>&1 &
+FFMPEG_PID=$!
+sleep 3; grep -i 'trailing option' /tmp/zs-smoke/ffmpeg.log && echo "BUG: -t ignored, kill $FFMPEG_PID now"
 ```
+
+**`-t` must come BEFORE the output URL.** Placed after it, ffmpeg prints `Trailing option(s) found in the
+command: may be ignored` and streams forever; on 2026-10-12 a staging smoke stream ran until it was killed by hand.
+Check the log for that warning immediately after launch.
+
+**Stop it with `kill -INT $FFMPEG_PID`**, never `pkill -f 'ffmpeg...'`: a `-f` pattern also matches any shell loop
+whose command line mentions ffmpeg (your own watcher), and a SIGKILLed RTMP session leaves Cloudflare's recording in
+`live-inprogress` for many minutes, so the Video Asset webhook (and the recording thumbnail) do not arrive.
 
 **The `-g 60 -keyint_min 60 -sc_threshold 0` flags are required.** Without an explicit keyframe
 interval Cloudflare rejects the stream with `ERR_GOP_OUT_OF_RANGE` ("Input GOP size or keyframe
@@ -555,9 +567,16 @@ logs as `Unknown Cloudflare event type: live_input.errored` and otherwise ignore
 
 Check for `live_input.connected`, `Published stream event`, stream poller showing 1 live stream, then after the stream ends: `live_input.disconnected`, `Stream ended`.
 
-**Step 5: Verify on Nostr and clean up**
+**Step 5: Clean up FIRST, then gather any extra evidence**
 
-Query for the event, then delete it using procedure 6.
+The test event is live on public relays from the moment it is published. As soon as the lifecycle you set out to
+check has been observed, delete the stream (procedure 6, API method with the smoke key). Do not spend minutes polling
+for secondary signals (recording webhook, thumbnail swap) while it is still up.
+
+Run the DELETE **on its own**, with a short timeout, and verify on the relays in a **separate** command. A write
+bundled with relay queries can sit for a minute on slow relays; if it is interrupted nobody can tell whether the
+write went out. If a command is interrupted, check state before reporting what happened: the harness shows it as
+rejected, but it may already have executed.
 
 ### Notes
 

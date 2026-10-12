@@ -61,7 +61,9 @@ original `APP_CONFIG_YAML` with `APP__RELAYS` removed.
 
 **Staging KEEPS the shim (`APP_CONFIG_YAML` + start command) deliberately** — it runs feature branches
 forked from upstream `main` that lack this fix, and those crash with `APP__RELAYS` set or with a file
-that selects `lnd`. Never set `APP__RELAYS` on Staging. **Production** may retire the shim once
+that selects `lnd`. Never set `APP__RELAYS` on Staging. **It was found set on Staging on 2026-10-12** (left over from
+verifying 27c4ca0) and had to be deleted before `feat/live-thumbnail`, a `main`-based branch, could deploy. Before
+pointing staging at any branch, run `railway variables` for Staging and confirm `APP__RELAYS` is absent. **Production** may retire the shim once
 `shosho-production` carries 27c4ca0: set `APP__RELAYS`, clear the custom start command, delete
 `APP_CONFIG_YAML` (in that order — deleting the variable first makes the shim write an empty file).
 

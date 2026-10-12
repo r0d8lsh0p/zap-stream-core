@@ -192,5 +192,11 @@ These mistakes have happened. Do not repeat them.
 | Using upstream default config locally | Hardcoded values don't work on other machines |
 | Merging compose files for local dev | Port conflicts, phantom volume mounts, confusing behavior |
 | Running cloudflared without nohup | Tunnel dies when the calling process exits |
+| ffmpeg `-t` placed after the output URL | ffmpeg prints `Trailing option(s) found` and ignores it; a smoke-test stream to staging ran with no end until killed by hand (2026-10-12). Options go before the output; check for that warning right after launch |
+| Stopping ffmpeg with `pkill -f 'ffmpeg.*rtmps'` | The pattern also matched the agent's own watcher loop and killed it; ffmpeg was then SIGKILLed, and Cloudflare left the recording in `live-inprogress` for 7+ minutes with no Video Asset webhook. Save `$!` at launch and `kill -INT $PID` |
+| Bundling a write (API DELETE) with slow relay queries in one command | The command sat for a minute on relay round-trips; when the user interrupted it, nobody could tell whether the DELETE had gone out. One write per command, verify in a separate one |
+| Reporting an interrupted command as "not run" | The harness shows an interrupted command as rejected, but it may already have executed. Check state before saying what did or did not happen |
+| Polling for secondary evidence while a test event is live on public relays | Minutes spent waiting for a recording webhook while an ended test 30311 sat on damus/primal/snort. Clean up first; gather extra evidence after |
+| Pointing staging at a `main`-based branch while `APP__RELAYS` is set | Upstream `main` cannot parse the comma list and crash-loops. Check `railway variables` for `APP__RELAYS` before switching staging's branch (see `notes/deployment-model.md`) |
 | Agent opened an upstream PR (v0l/zap-stream-core#109, 2026-10-12) | "I would now submit this upstream" was read as a go-ahead. It was not. Only the user opens upstream PRs, manually |
 | `🤖 Generated with Claude Code` footer on an upstream PR body | Must never appear upstream. Strip it from every draft |
