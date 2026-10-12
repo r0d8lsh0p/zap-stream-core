@@ -133,6 +133,9 @@ impl ApiBase {
             if let Some(goal) = patch.goal {
                 stream.goal = Some(goal);
             }
+            if let Some(pinned) = patch.pinned {
+                stream.pinned = Some(pinned);
+            }
 
             let planned = is_planned(&patch.status)?;
             if planned {

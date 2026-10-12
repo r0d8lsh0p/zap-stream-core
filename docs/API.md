@@ -217,7 +217,8 @@ PATCH /api/v1/event
   "goal": "string",
   "status": "planned",
   "starts": "2024-01-01T00:00:00Z",
-  "ends": "2024-01-01T01:00:00Z"
+  "ends": "2024-01-01T01:00:00Z",
+  "pinned": "string"
 }
 ```
 
@@ -227,7 +228,7 @@ PATCH /api/v1/event
 {}
 ```
 
-**Description:** Updates stream event metadata such as title, description, image, tags, content warnings, and goals.
+**Description:** Updates stream event metadata such as title, description, image, tags, content warnings, goals, and pinned live chat messages.
 `status: "planned"` sets the stream to planned with the given `starts` and `ends` and publishes it, including a
 custom-key stream that has ended, which plans its next broadcast. `starts` and `ends` are only applied with it. Edits
 to a live stream, or to a planned stream that has been published, are republished immediately; other edits are
