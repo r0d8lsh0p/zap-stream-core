@@ -243,6 +243,13 @@ async fn e2e_single_user_lifecycle() {
         nostr_relay::has_tag(live_event, "streaming"),
         "LIVE event missing 'streaming' tag"
     );
+    let image = nostr_relay::get_tag_value(live_event, "image")
+        .expect("LIVE event missing 'image' tag");
+    assert!(
+        image.ends_with("/thumbnails/thumbnail.jpg"),
+        "LIVE event 'image' should be the Cloudflare live thumbnail (got {})",
+        image
+    );
     assert!(
         nostr_relay::has_tag(live_event, "starts"),
         "LIVE event missing 'starts' tag"
