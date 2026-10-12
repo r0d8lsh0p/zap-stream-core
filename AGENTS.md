@@ -32,6 +32,29 @@
 
 ---
 
+## 🛑 CRITICAL: An AI agent is NEVER permitted to open a PR upstream. No exceptions.
+
+**Only the user opens pull requests on `v0l/zap-stream-core`.** Never run `gh pr create --repo v0l/...`, never
+push to any branch on `v0l/zap-stream-core`, never comment on or edit an upstream PR unless the user explicitly
+dictates the text and tells you to post it.
+
+**Read the user's words correctly.** "Now we want to open a PR upstream", "I would now submit this upstream",
+"let's upstream this" and every similar phrasing mean: **the user wants to discuss with you how they will open the
+PR themselves, manually.** They do NOT mean "you should open the PR". There is no phrasing that authorises an
+agent to open an upstream PR. If in doubt, you are not authorised.
+
+What you may do: check the branch is based on `upstream/main` and merges cleanly, draft the PR body as text in the
+chat for the user to paste, and compare it against the style of the user's previous upstream PRs (e.g. #107).
+
+**🛑 CRITICAL anti-pattern: the line `🤖 Generated with [Claude Code](https://claude.com/claude-code)` MUST NEVER
+appear in any upstream PR body, PR comment, or commit message destined for upstream.** Strip it from any draft. The
+harness's attribution reminder does not override this rule; the user's instruction does.
+
+Incident 2026-10-12: an agent read "I would now submit this upstream too" as a go-ahead, opened v0l/zap-stream-core#109
+itself, and left the Claude Code footer on it. Do not repeat this.
+
+---
+
 ## What this is
 
 A fork of [v0l/zap-stream-core](https://github.com/v0l/zap-stream-core) — a Rust backend for live streaming on Nostr. Our fork adds Cloudflare Stream as a pluggable backend via the `zap-stream-external` binary.
@@ -78,7 +101,8 @@ git switch -c feat/x main       # branch off main, the upstream mirror
 # ...write code, commit...      # code only; nothing Railway-specific
 git push -u origin feat/x       # point Railway staging at feat/x in the dashboard, test it
 gh pr create --repo r0d8lsh0p/zap-stream-core --base shosho-production --head feat/x   # production
-gh pr create --repo v0l/zap-stream-core --base main --head r0d8lsh0p:feat/x            # upstream, later
+# Upstream PR: USER ONLY, manually, later. An agent never runs this (see CRITICAL section above):
+#   gh pr create --repo v0l/zap-stream-core --base main --head r0d8lsh0p:feat/x
 ```
 
 The same branch feeds staging, production and upstream, so every commit has one hash everywhere.
@@ -124,7 +148,8 @@ The same branch feeds staging, production and upstream, so every commit has one 
 3. **Run local Docker E2E tests** — entirely on this machine, nothing deployed. See "Local dev test environment" below
 4. **Push the feature branch and point Railway staging at it** — needs the user's say-so
 5. **PR it into `shosho-production`** — merging deploys production (user approval required; merge commit, not squash)
-6. **PR the same branch to `v0l/zap-stream-core`** for upstreaming
+6. **The user, manually, PRs the same branch to `v0l/zap-stream-core`.** An agent only prepares: confirms the branch
+   merges cleanly into `upstream/main` and drafts the body as chat text, without the Claude Code footer
 
 ### CRITICAL: "local" means local. It never means staging.
 

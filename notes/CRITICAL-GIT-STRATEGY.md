@@ -33,6 +33,18 @@ railway/external                  <-- retired 2026-10-05, rollback only. Deploys
 
 ---
 
+## Upstream PRs: USER ONLY
+
+**An AI agent is never, under any circumstances, permitted to open a PR on `v0l/zap-stream-core`.** Phrases like
+"now we want to open a PR upstream" or "I would now submit this upstream" mean the user wants to discuss how *they*
+will open it manually. They never mean "open it". Agents may verify mergeability against `upstream/main` and draft
+body text in chat; nothing more.
+
+**The footer `🤖 Generated with [Claude Code](https://claude.com/claude-code)` MUST NEVER appear in any upstream PR
+body or comment.**
+
+---
+
 ## Production Auto-Deploy Warning
 
 **Merging into `shosho-production` = IMMEDIATE PRODUCTION DEPLOYMENT.**
@@ -180,3 +192,5 @@ These mistakes have happened. Do not repeat them.
 | Using upstream default config locally | Hardcoded values don't work on other machines |
 | Merging compose files for local dev | Port conflicts, phantom volume mounts, confusing behavior |
 | Running cloudflared without nohup | Tunnel dies when the calling process exits |
+| Agent opened an upstream PR (v0l/zap-stream-core#109, 2026-10-12) | "I would now submit this upstream" was read as a go-ahead. It was not. Only the user opens upstream PRs, manually |
+| `🤖 Generated with Claude Code` footer on an upstream PR body | Must never appear upstream. Strip it from every draft |
